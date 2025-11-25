@@ -21,7 +21,7 @@ class CFApi:
 
     async def get(self, path: str, query_params: dict = None):
         async with self.semaphore:
-            with await self.lock:
+            async with self.lock:
                 while self.next_allowed_time > time.monotonic():
                     await time.sleep(max(0, self.next_allowed_time - time.monotonic()))
                 self.next_allowed_time = time.monotonic() + 1
@@ -45,7 +45,7 @@ async def proxy(path: str, req: Request):
         if time.monotonic() - response["time"] < 3 * HOUR:
             return response["resp"]
 
-    response = await cfapi.client.get(path, params=req.query_params)
+    response = await cfapi.get(path, query_params=dict(req.query_params))
     if response.status_code == 200:
         cache[key] = {
             "resp": Response(
