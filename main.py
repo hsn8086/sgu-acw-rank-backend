@@ -1,5 +1,5 @@
 import time
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient
 from asyncio import Semaphore
 
@@ -35,6 +35,14 @@ async def proxy(path: str, req: Request):
 
     response = await CFApi().client.get(path, params=req.query_params)
     if response.status_code == 200:
-        cache[key] = {"resp": response.json(), "time": time.monotonic()}
-    return response.json()
+        cache[key] = {
+            "resp": Response(
+                content=response.content,
+                status_code=response.status_code,
+                # headers=response.headers,
+                media_type=response.headers.get("content-type","text/plain"),
+            ),
+            "time": time.monotonic(),
+        }
+    return cache[key]["resp"]
     # return {"path":path,"query_params":req.query_params}
