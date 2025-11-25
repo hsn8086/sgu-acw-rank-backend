@@ -16,9 +16,13 @@ class CFApi:
     def __init__(self):
         self.client = AsyncClient(base_url="https://codeforces.com/api/")
         self.semaphore = Semaphore(1)
+        self.next_allowed_time = 0
 
     async def get(self, path: str, query_params: dict = None):
         async with self.semaphore:
+            while self.next_allowed_time > time.monotonic():
+                await time.sleep(max(0, self.next_allowed_time - time.monotonic()))
+            self.next_allowed_time = time.monotonic() + 1 
             response = await self.client.get(path, params=query_params)
             return response
 
