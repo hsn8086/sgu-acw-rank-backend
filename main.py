@@ -1,7 +1,7 @@
 import time
 from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient
-from asyncio import Semaphore
+from asyncio import Semaphore, Lock
 from loguru import logger
 
 logger.add("debug.log", rotation="10 MB", level="DEBUG")
@@ -15,14 +15,16 @@ DAY = 24 * HOUR
 class CFApi:
     def __init__(self):
         self.client = AsyncClient(base_url="https://codeforces.com/api/")
-        self.semaphore = Semaphore(1)
+        self.semaphore = Semaphore(2)
+        self.lock = Lock()
         self.next_allowed_time = 0
 
     async def get(self, path: str, query_params: dict = None):
         async with self.semaphore:
-            while self.next_allowed_time > time.monotonic():
-                await time.sleep(max(0, self.next_allowed_time - time.monotonic()))
-            self.next_allowed_time = time.monotonic() + 1 
+            with await self.lock:
+                while self.next_allowed_time > time.monotonic():
+                    await time.sleep(max(0, self.next_allowed_time - time.monotonic()))
+                self.next_allowed_time = time.monotonic() + 0.5
             response = await self.client.get(path, params=query_params)
             return response
 
@@ -30,6 +32,7 @@ class CFApi:
 app = FastAPI()
 
 cache = {}
+cfapi = CFApi()
 
 
 @app.get("{path:path}")
@@ -41,7 +44,7 @@ async def proxy(path: str, req: Request):
         if time.monotonic() - response["time"] < 3 * HOUR:
             return response["resp"]
 
-    response = await CFApi().client.get(path, params=req.query_params)
+    response = await cfapi.client.get(path, params=req.query_params)
     if response.status_code == 200:
         cache[key] = {
             "resp": Response(
