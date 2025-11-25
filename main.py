@@ -53,7 +53,7 @@ async def proxy(path: str, req: Request):
     key = (path, tuple(sorted(req.query_params.items())))
     if key in cache:
         response = cache[key]
-        if time.monotonic() - response["time"] < 3 * HOUR:
+        if time.monotonic() - response["time"] < 6 * HOUR:
             return response["resp"]
 
     response = await cfapi.get(path, query_params=dict(req.query_params))
