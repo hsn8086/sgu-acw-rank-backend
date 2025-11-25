@@ -1,5 +1,5 @@
 import time
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response,middleware
 from httpx import AsyncClient
 from asyncio import Semaphore, Lock
 import asyncio
@@ -21,17 +21,25 @@ class CFApi:
         self.next_allowed_time = 0
 
     async def get(self, path: str, query_params: dict = None):
-        async with self.semaphore:
-            async with self.lock:
-                while self.next_allowed_time > time.monotonic():
-                    await asyncio.sleep(max(0, self.next_allowed_time - time.monotonic()))
-                self.next_allowed_time = time.monotonic() + 0.5
-            logger.debug(f"Making request to {path} with params {query_params}")
-            response = await self.client.get(path, params=query_params,timeout=10.0)
-            return response
+        # async with self.semaphore:
+        async with self.lock:
+            while self.next_allowed_time > time.monotonic():
+                await asyncio.sleep(max(0, self.next_allowed_time - time.monotonic()))
+            self.next_allowed_time = time.monotonic() + 1
+        logger.debug(f"Making request to {path} with params {query_params}")
+        response = await self.client.get(path, params=query_params,timeout=10.0)
+        return response
 
 
 app = FastAPI()
+# CORS
+app.add_middleware(
+    middleware.cors.CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 cache = {}
 cfapi = CFApi()
