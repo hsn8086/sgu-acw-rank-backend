@@ -1,5 +1,6 @@
 import time
-from fastapi import FastAPI, Request, Response,middleware
+from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from httpx import AsyncClient
 from asyncio import Semaphore, Lock
 import asyncio
@@ -32,15 +33,16 @@ class CFApi:
 
 
 app = FastAPI()
-# CORS
+origins = [
+    "*",
+]
 app.add_middleware(
-    middleware.cors.CORSMiddleware,
-    allow_origins=["*"],
+    CORSMiddleware,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 cache = {}
 cfapi = CFApi()
 
