@@ -15,7 +15,7 @@ DAY = 24 * HOUR
 class CFApi:
     def __init__(self):
         self.client = AsyncClient(base_url="https://codeforces.com/api/")
-        self.semaphore = Semaphore(2)
+        self.semaphore = Semaphore(1)
 
     async def get(self, path: str, query_params: dict = None):
         async with self.semaphore:
@@ -44,9 +44,14 @@ async def proxy(path: str, req: Request):
                 content=response.content,
                 status_code=response.status_code,
                 # headers=response.headers,
-                media_type=response.headers.get("content-type","text/plain"),
+                media_type=response.headers.get("content-type", "text/plain"),
             ),
             "time": time.monotonic(),
         }
-    return cache[key]["resp"]
+        return cache[key]["resp"]
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        media_type=response.headers.get("content-type", "text/plain"),
+    )
     # return {"path":path,"query_params":req.query_params}
