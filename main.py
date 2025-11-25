@@ -2,6 +2,9 @@ import time
 from fastapi import FastAPI, Request, Response
 from httpx import AsyncClient
 from asyncio import Semaphore
+from loguru import logger
+
+logger.add("debug.log", rotation="10 MB", level="DEBUG")
 
 SECOND = 1
 MINUTE = 60 * SECOND
@@ -26,6 +29,7 @@ cache = {}
 
 
 @app.get("{path:path}")
+@logger.catch
 async def proxy(path: str, req: Request):
     key = (path, tuple(sorted(req.query_params.items())))
     if key in cache:
