@@ -1,12 +1,35 @@
 [project]
 name = "sgu-acw-rank-backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "SGU ACW 成员与榜单后端"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.122.0",
+    "uvicorn[standard]>=0.38.0",
+    "sqlmodel>=0.0.30",
+    "pydantic-settings>=2.7",
     "httpx>=0.28.1",
-    "loguru>=0.7.3",
-    "uvicorn>=0.38.0",
+    "python-multipart>=0.0.20",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency injection *is* a call in an argument default; that is the
+# documented idiom, not a mutable-default bug.
+"app/deps.py" = ["B008"]
+"app/routers/*.py" = ["B008"]
+"app/main.py" = ["B008"]

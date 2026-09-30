@@ -1,0 +1,100 @@
+"""Password hashing and session tokens.
+
+Both primitives come from the standard library on purpose: the target host has
+a tight memory budget and no compiler, so pulling in bcrypt or argon2 would cost
+more than it buys. ``hashlib.scrypt`` is a memory-hard KDF and is a reasonable
+stand-in.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import secrets
+
+from .config import get_settings
+
+#: scrypt produces 64-byte blocks per (r, p) pair; 32 bytes of salt is the
+#: conventional choice and leaves the hash at 64 bytes.
+SALT_BYTES = 32
+KEY_LEN = 64
+
+#: Session tokens are 32 random bytes, base64url-encoded by ``token_urlsafe``.
+SESSION_TOKEN_BYTES = 32
+
+
+def hash_password(password: str, *, salt: bytes | None = None) -> str:
+    """Return ``scrypt$<salt-hex>$<key-hex>``.
+
+    The parameters are embedded in the stored string so that raising the work
+    factor later does not invalidate existing hashes.
+    """
+    settings = get_settings()
+    salt = salt or secrets.token_bytes(SALT_BYTES)
+    key = hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=settings.scrypt_n,
+        r=settings.scrypt_r,
+        p=settings.scrypt_p,
+        dklen=KEY_LEN,
+    )
+    return (
+        f"scrypt${settings.scrypt_n}${settings.scrypt_r}${settings.scrypt_p}"
+        f"${salt.hex()}${key.hex()}"
+    )
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Check ``password`` against a string produced by :func:`hash_password`.
+
+    Returns False rather than raising on malformed input, so a corrupted row
+    reads as a failed login instead of a 500.
+    """
+    try:
+        scheme, n, r, p, salt_hex, key_hex = stored.split("$")
+        if scheme != "scrypt":
+            return False
+        key = hashlib.scrypt(
+            password.encode("utf-8"),
+            salt=bytes.fromhex(salt_hex),
+            n=int(n),
+            r=int(r),
+            p=int(p),
+            dklen=len(bytes.fromhex(key_hex)),
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(key.hex(), key_hex)
+
+
+def new_session_token() -> str:
+    """A fresh opaque session token. Only its hash is ever stored."""
+    return secrets.token_urlsafe(SESSION_TOKEN_BYTES)
+
+
+def hash_session_token(token: str) -> str:
+    """Hash a session token for storage.
+
+    A plain SHA-256 is right here: the token is already 256 bits of entropy, so
+    there is nothing to brute force, and this keeps lookup a single indexed
+    comparison.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def new_invite_code() -> str:
+    """A short, human-readable invite code.
+
+    Eight characters from an alphabet with the look-alikes removed, which leaves
+    about 40 bits. Codes are single-use by default and expire quickly, so that
+    is ample, and it survives being read aloud in a group chat.
+    """
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(alphabet) for _ in range(8))
+
+
+def new_verify_token() -> str:
+    """The ``SGU-xxxx`` string a member pastes into a platform profile."""
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "SGU-" + "".join(secrets.choice(alphabet) for _ in range(4))
