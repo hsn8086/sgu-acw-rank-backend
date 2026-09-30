@@ -20,7 +20,7 @@ from .config import get_settings
 from .db import get_engine, init_db
 from .deps import require_origin_secret
 from .models import Role, User, utcnow
-from .routers import meta
+from .routers import admin, auth, meta, users
 from .security import hash_password
 from .student_id import StudentIdError, parse_student_id
 
@@ -88,6 +88,9 @@ def create_app() -> FastAPI:
 
     app.include_router(meta.health_router, prefix=API_PREFIX)
     app.include_router(meta.router, prefix=API_PREFIX)
+    app.include_router(auth.router, prefix=API_PREFIX)
+    app.include_router(users.router, prefix=API_PREFIX)
+    app.include_router(admin.router, prefix=API_PREFIX)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(_request, exc: StarletteHTTPException) -> JSONResponse:
