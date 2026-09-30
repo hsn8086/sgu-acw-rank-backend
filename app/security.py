@@ -90,11 +90,29 @@ def new_invite_code() -> str:
     about 40 bits. Codes are single-use by default and expire quickly, so that
     is ample, and it survives being read aloud in a group chat.
     """
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(secrets.choice(alphabet) for _ in range(8))
+    return _random_code(8)
+
+
+#: Alphabet without 0/O, 1/I/L — the characters people mistype when copying a
+#: code or password out of a chat message. Uppercase only: invite codes are
+#: matched case-insensitively against what the member types, and mixing case
+#: would turn a transcription slip into a confusing "invalid code".
+UNAMBIGUOUS_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def _random_code(length: int) -> str:
+    return "".join(secrets.choice(UNAMBIGUOUS_ALPHABET) for _ in range(length))
+
+
+def new_temporary_password() -> str:
+    """A password an administrator reads out to a member who lost theirs.
+
+    Sixteen characters from the unambiguous alphabet, giving about 95 bits.
+    Avoids base64url punctuation because this gets typed by hand.
+    """
+    return _random_code(16)
 
 
 def new_verify_token() -> str:
     """The ``SGU-xxxx`` string a member pastes into a platform profile."""
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "SGU-" + "".join(secrets.choice(alphabet) for _ in range(4))
+    return "SGU-" + _random_code(4)

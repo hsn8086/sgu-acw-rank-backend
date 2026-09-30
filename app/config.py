@@ -41,7 +41,8 @@ class Settings(BaseSettings):
 
     # Scrypt work factor. n must be a power of two; 2**14 keeps a login around
     # 50ms on the target VPS while staying far above the memory a GPU rig would
-    # find worthwhile.
+    # find worthwhile. Tests lower this via SGU_ACW_SCRYPT_N to keep the suite
+    # fast; production never overrides it.
     scrypt_n: int = 2**14
     scrypt_r: int = 8
     scrypt_p: int = 1

@@ -21,7 +21,7 @@ from ..schemas import (
     UpdateUserAdminRequest,
     UserAdmin,
 )
-from ..security import hash_password, new_invite_code, new_session_token
+from ..security import hash_password, new_invite_code, new_temporary_password
 
 router = APIRouter(
     prefix="/admin",
@@ -185,7 +185,7 @@ def reset_password(
     if user.is_root and not admin.is_root:
         raise HTTPException(status_code=403, detail="只有 root 可以重置 root 的密码")
 
-    temporary = new_session_token()[:16]
+    temporary = new_temporary_password()
     user.password_hash = hash_password(temporary)
     db.add(user)
     for row in db.exec(select(UserSession).where(UserSession.user_id == user.id)).all():
