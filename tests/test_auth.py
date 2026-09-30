@@ -525,3 +525,35 @@ def test_concurrent_registration_cannot_overuse_invite(client, root_client):
     listed = root_client.get("/api/admin/invites").json()
     row = next(i for i in listed if i["code"] == invite["code"])
     assert row["use_count"] == 1
+
+
+def test_session_endpoint_returns_null_when_logged_out(client):
+    """页面加载时用它问「我是谁」，未登录也不该是 401。
+
+    /auth/me 对未登录返回 401 是对的，但前端每次加载都调一次，控制台就会
+    被 401 刷屏，真正的故障反而看不见。
+    """
+    response = client.get("/api/auth/session")
+    assert response.status_code == 200
+    assert response.json() == {"user": None}
+
+
+def test_session_endpoint_returns_user_when_logged_in(client):
+    client.post(
+        "/api/auth/login",
+        json={"student_id": ROOT_STUDENT_ID, "password": ROOT_PASSWORD},
+    )
+    body = client.get("/api/auth/session").json()
+    assert body["user"]["student_id"] == ROOT_STUDENT_ID
+    # 与成员视角一致，不能带出 admin_note。
+    assert "admin_note" not in body["user"]
+
+
+def test_session_endpoint_ignores_a_disabled_account(client, root_client):
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+    members = root_client.get("/api/admin/users").json()
+    member = next(m for m in members if m["student_id"] == MEMBER_STUDENT_ID)
+    root_client.patch(f"/api/admin/users/{member['id']}", json={"status": "disabled"})
+
+    assert client.get("/api/auth/session").json() == {"user": None}

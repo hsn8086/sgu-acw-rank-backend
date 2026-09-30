@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 
 from ..config import get_settings
 from ..db import get_session
-from ..deps import get_current_user, require_origin_secret
+from ..deps import get_current_user, get_optional_user, require_origin_secret
 from ..models import Invite, User, UserSession, UserStatus, utcnow
 from ..schemas import (
     ChangePasswordRequest,
@@ -208,6 +208,19 @@ def logout(
 @router.get("/me", response_model=UserSelf)
 def me(user: User = Depends(get_current_user)) -> User:
     return user
+
+
+@router.get("/session")
+def session(
+    user: User | None = Depends(get_optional_user),
+) -> dict:
+    """当前会话，未登录时返回 ``{"user": null}`` 而非 401。
+
+    前端每次加载都要问「我是谁」，用 /auth/me 的话未登录会返回 401，浏览器
+    控制台会把每个 401 记成错误。这里始终返回 200，让「未登录」和「出错」
+    在客户端能区分开。需要鉴权的接口仍然用 /auth/me。
+    """
+    return {"user": UserSelf.model_validate(user) if user else None}
 
 
 @router.patch("/me", response_model=UserSelf)
