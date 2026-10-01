@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from sqlmodel import Session, select
@@ -35,7 +35,7 @@ from ..schemas import (
     PracticeDay,
     SyncStatus,
 )
-from ..sync import CST
+from ..sync import current_practice_day
 
 router = APIRouter(
     prefix="/practice",
@@ -45,8 +45,12 @@ router = APIRouter(
 
 
 def _recent_dates(days: int) -> list[str]:
-    """最近 ``days`` 天的日期列表（含今天），按东八区算，从早到晚。"""
-    today = utcnow().astimezone(CST).date()
+    """最近 ``days`` 个练习日（含今天），从早到晚。
+
+    练习日的定义在 app/sync.py：以东八区凌晨 4 点为界，所以凌晨 0 到 3 点
+    访问时，「今天」仍然是昨天那个练习日。
+    """
+    today = date.fromisoformat(current_practice_day())
     return [
         (today - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(days - 1, -1, -1)
     ]

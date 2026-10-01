@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 from sqlmodel import Session, select
 
@@ -41,6 +41,13 @@ logger = logging.getLogger("sgu_acw.sync")
 #: 是北京时间，直接按 UTC 分会把晚上的提交算到第二天。
 CST = timezone(timedelta(hours=8))
 
+#: 一天的起点定在凌晨 4 点而不是 0 点。
+#:
+#: 比赛经常打到半夜，凌晨一两点交的题在感觉上属于「昨天那一场」。按自然日
+#: 切会把这些散到第二天，看上去像是第二天在刷题。定在 4 点，凌晨 0 到 3 点
+#: 的记录仍然算前一天。
+DAY_BOUNDARY_HOUR = 4
+
 #: 差分时最多回溯多久。如果两次同步隔了特别久（服务停了很久），把增量
 #: 平摊到每天会让某一天虚高，不如只记最近这些天，其余忽略。
 MAX_BACKFILL_DAYS = 7
@@ -50,8 +57,23 @@ RETENTION_DAYS = 400
 
 
 def _day_of(epoch: int) -> str:
-    """epoch 秒 → 东八区的 YYYY-MM-DD。"""
-    return datetime.fromtimestamp(epoch, UTC).astimezone(CST).strftime("%Y-%m-%d")
+    """epoch 秒 → 练习日的 YYYY-MM-DD。
+
+    练习日以东八区凌晨 4 点为界：先转成北京时间，再减去 4 小时，取日期。
+    于是 0 点到 3 点 59 分的记录归到前一天。
+    """
+    return practice_day_of(datetime.fromtimestamp(epoch, UTC))
+
+
+def practice_day_of(moment: datetime) -> str:
+    """某个时刻属于哪个练习日。用于把任意时间归到练习日上。"""
+    local = moment.astimezone(CST)
+    return (local - timedelta(hours=DAY_BOUNDARY_HOUR)).strftime("%Y-%m-%d")
+
+
+def current_practice_day() -> str:
+    """此刻属于哪个练习日。"""
+    return practice_day_of(utcnow())
 
 
 def _upsert_progress(
@@ -160,8 +182,8 @@ def _apply_diff(
 
     # 增量归属到「上次同步那天」到今天之间的日子。无法知道具体是哪天做
     # 的，全部记到上次同步那一天，这样总量不会丢，也不会把某天撑得虚高。
-    anchor = (snapshot.previous_fetched_at or now).astimezone(CST).date()
-    today = now.astimezone(CST).date()
+    anchor = date.fromisoformat(practice_day_of(snapshot.previous_fetched_at or now))
+    today = date.fromisoformat(current_practice_day())
     oldest = today - timedelta(days=MAX_BACKFILL_DAYS)
     if anchor < oldest:
         anchor = oldest
@@ -201,7 +223,9 @@ def sync_account(db: Session, account: Account) -> tuple[bool, str, int]:
 
     # 其余平台（CF / AtCoder / 牛客）都有时间戳。只重算最近一段时间，
     # 够覆盖排行榜展示的窗口，也不必每次重写全部历史。
-    since = (utcnow().astimezone(CST).date() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
+    since = (date.fromisoformat(current_practice_day()) - timedelta(days=RETENTION_DAYS)).strftime(
+        "%Y-%m-%d"
+    )
     total = _apply_timestamped(db, account, solved, since_day=since)
 
     # 存一份快照，便于排查抓取是否正常。
@@ -229,7 +253,9 @@ def sync_account(db: Session, account: Account) -> tuple[bool, str, int]:
 
 def prune_old_progress(db: Session) -> int:
     """删掉超过保留期的记录。返回删除行数。"""
-    cutoff = (utcnow().astimezone(CST).date() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
+    cutoff = (date.fromisoformat(current_practice_day()) - timedelta(days=RETENTION_DAYS)).strftime(
+        "%Y-%m-%d"
+    )
     rows = db.exec(select(DailyProgress).where(DailyProgress.date < cutoff)).all()
     for row in rows:
         db.delete(row)

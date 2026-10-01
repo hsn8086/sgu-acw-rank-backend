@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlmodel import Session, select
@@ -71,15 +71,28 @@ def _make_account(
 
 
 def _epoch(days_ago: int, hour: int = 12) -> int:
-    """东八区某天某点的 epoch 秒。"""
-    target = (utcnow().astimezone(CST) - timedelta(days=days_ago)).replace(
-        hour=hour, minute=0, second=0, microsecond=0
-    )
-    return int(target.timestamp())
+    """距今 ``days_ago`` 个练习日、北京时间 ``hour`` 点的 epoch 秒。
+
+    以练习日为基准而不是自然日，这样在凌晨 0 到 3 点跑测试时，
+    ``_epoch(0)`` 和 ``_day(0)`` 仍然指向同一天。
+    """
+    from datetime import date
+
+    from app.sync import current_practice_day
+
+    day = date.fromisoformat(current_practice_day()) - timedelta(days=days_ago)
+    moment = datetime(day.year, day.month, day.day, hour, tzinfo=CST)
+    return int(moment.timestamp())
 
 
 def _day(days_ago: int) -> str:
-    return (utcnow().astimezone(CST) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+    """距今 ``days_ago`` 个练习日的日期。"""
+    from datetime import date
+
+    from app.sync import current_practice_day
+
+    today = date.fromisoformat(current_practice_day())
+    return (today - timedelta(days=days_ago)).strftime("%Y-%m-%d")
 
 
 def _progress(db: Session, account: Account, date: str) -> int:
@@ -237,17 +250,57 @@ def test_sync_account_reports_fetch_failure(env, monkeypatch):
 
 
 def test_day_boundary_uses_east_eight(env):
-    """按东八区切日：UTC 深夜的提交算作北京时间第二天。"""
+    """按东八区切日，且凌晨 4 点才换天。
+
+    北京时间今天 01:00 属于**昨天**那个练习日：比赛打到半夜，凌晨交的题
+    在感觉上还是昨天那一场。
+    """
     with Session(get_engine()) as db:
         user = _make_user(db, "24125023001", "甲")
         account = _make_account(db, user, "alpha")
 
-        # 北京时间今天 01:00 = UTC 昨天 17:00。按 UTC 分会算到昨天。
         solved = SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(0, hour=1)})
         _apply_timestamped(db, account, solved)
         db.commit()
 
-        assert _progress(db, account, _day(0)) == 1
+        # 归到昨天，不是今天。
+        assert _progress(db, account, _day(1)) == 1
+        assert _progress(db, account, _day(0)) == 0
+
+
+def test_day_boundary_at_four_am(env):
+    """4 点前后分属不同的练习日。"""
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+
+        # 今天 03:30 仍是昨天，04:30 就是今天。
+        _apply_timestamped(
+            db, account, SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(0, hour=3)})
+        )
+        _apply_timestamped(
+            db, account, SolvedSet(Platform.CODEFORCES, "alpha", {"b": _epoch(0, hour=5)})
+        )
+        db.commit()
+
+        assert _progress(db, account, _day(1)) == 1  # 03:30 → 昨天
+        assert _progress(db, account, _day(0)) == 1  # 05:00 → 今天
+
+
+def test_practice_day_helper():
+    """练习日的定义：东八区减 4 小时取日期。"""
+    from datetime import datetime
+
+    from app.sync import CST, practice_day_of
+
+    cases = [
+        (datetime(2026, 10, 1, 0, 30, tzinfo=CST), "2026-09-30"),
+        (datetime(2026, 10, 1, 3, 59, tzinfo=CST), "2026-09-30"),
+        (datetime(2026, 10, 1, 4, 0, tzinfo=CST), "2026-10-01"),
+        (datetime(2026, 10, 1, 23, 30, tzinfo=CST), "2026-10-01"),
+    ]
+    for moment, expected in cases:
+        assert practice_day_of(moment) == expected, moment
 
 
 # --------------------------------------------------------------------------- #
