@@ -118,3 +118,24 @@ def test_backup_rejects_non_sqlite(monkeypatch):
         run_backup()
 
     get_settings.cache_clear()
+
+
+def test_list_backups_fails_loudly_when_database_missing(tmp_path, monkeypatch):
+    """库路径不对时要报错，而不是返回空列表。
+
+    手动跑时很容易忘了带 SGU_ACW_DATABASE_URL（那个环境文件只有 systemd
+    会加载），路径就默认到工作目录下了。空列表会被误读成「没有备份」，
+    而实际是「看错地方了」。
+    """
+    monkeypatch.setenv("SGU_ACW_DATABASE_URL", f"sqlite:///{tmp_path / 'nope.db'}")
+
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    from app.backup import list_backups
+
+    with pytest.raises(FileNotFoundError, match="数据库不存在"):
+        list_backups()
+
+    get_settings.cache_clear()

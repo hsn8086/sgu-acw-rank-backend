@@ -90,6 +90,17 @@ def _prune(db_path: Path, *, keep: int) -> None:
 def list_backups() -> list[tuple[str, int]]:
     """列出备份：``(文件名, 字节数)``，从新到旧。"""
     db_path = _db_path()
+
+    # 库不存在时直接报错，不要静默返回空列表。
+    #
+    # 手动跑时很容易忘了带上 SGU_ACW_DATABASE_URL（那个环境文件只有 systemd
+    # 会加载），于是路径默认为工作目录下的 sgu-acw.db，globbing 什么都找不到。
+    # 空列表会被误读成「没有备份」，而实际是「看错地方了」。
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"数据库不存在：{db_path}\n手动执行时要带上 SGU_ACW_DATABASE_URL，或用 systemctl 跑。"
+        )
+
     out: list[tuple[str, int]] = []
     for path in sorted(
         db_path.parent.glob(f"{db_path.name}.bak-*"),
