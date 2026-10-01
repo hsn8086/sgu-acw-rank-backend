@@ -544,3 +544,89 @@ def test_timestamped_returns_real_delta_not_total(env):
         )
         db.commit()
         assert more == 1
+
+
+# --------------------------------------------------------------------------- #
+# rating 榜
+# --------------------------------------------------------------------------- #
+
+
+def test_rating_board_is_per_account_not_per_person(env):
+    """rating 榜以账号为单位。
+
+    一个人可以有主号和小号，两个号各有各的 rating，合并成一个数没有意义。
+    这是与练习量榜最大的不同——后者按人合并，前者不合并。
+    """
+    from app.routers.practice import rating_board
+
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        main = _make_account(db, user, "main")
+        alt = _make_account(db, user, "alt")
+        main.rating = 1667
+        alt.rating = 1599
+        db.add(main)
+        db.add(alt)
+        db.commit()
+
+        board = rating_board(_current=user, db=db, platform=Platform.CODEFORCES)
+
+        # 两行都是同一个人。
+        assert len(board.entries) == 2
+        assert {e.user_id for e in board.entries} == {user.id}
+        assert [e.identifier for e in board.entries] == ["main", "alt"]
+        assert [e.rating for e in board.entries] == [1667, 1599]
+
+
+def test_rating_board_skips_accounts_without_rating(env):
+    """还没抓到 rating 的账号不列出。
+
+    列出来的话会占着位置显示一个空值，看起来像是数据坏了。
+    """
+    from app.routers.practice import rating_board
+
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        ready = _make_account(db, user, "ready")
+        ready.rating = 1500
+        db.add(ready)
+        _make_account(db, user, "pending")  # rating 仍为 None
+        db.commit()
+
+        board = rating_board(_current=user, db=db, platform=Platform.CODEFORCES)
+        assert [e.identifier for e in board.entries] == ["ready"]
+
+
+def test_rating_board_only_shows_verified_accounts(env):
+    """未验证的账号不上榜。"""
+    from app.routers.practice import rating_board
+
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "unverified")
+        account.verified_at = None
+        account.rating = 1500
+        db.add(account)
+        db.commit()
+
+        board = rating_board(_current=user, db=db, platform=Platform.CODEFORCES)
+        assert board.entries == []
+
+
+def test_rating_board_sorted_desc(env):
+    from app.routers.practice import rating_board
+
+    with Session(get_engine()) as db:
+        low = _make_user(db, "24125023001", "低")
+        high = _make_user(db, "24125023002", "高")
+        a = _make_account(db, low, "low")
+        a.rating = 1200
+        b = _make_account(db, high, "high")
+        b.rating = 2000
+        db.add(a)
+        db.add(b)
+        db.commit()
+
+        board = rating_board(_current=low, db=db, platform=Platform.CODEFORCES)
+        assert [e.identifier for e in board.entries] == ["high", "low"]
+        assert board.entries[0].rank == 1

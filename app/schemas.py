@@ -291,3 +291,81 @@ class SyncStatus(BaseModel):
     error_count: int = 0
     #: 失败账号的说明，供管理员排查。
     errors: list[str] = Field(default_factory=list)
+
+
+class RatingEntry(BaseModel):
+    """rating 榜的一行。
+
+    以**账号**为单位而不是以人为单位：一个人在同一平台可以有主号和小号，
+    两个号各有各的 rating，合并成一个数没有意义。
+    """
+
+    user_id: int
+    display_name: str
+    student_id: str
+    enroll_year: int
+    rank: int = 0
+
+    platform: str
+    identifier: str
+    #: 平台上的昵称，与 identifier 不一定相同（牛客的 identifier 是数字 uid）。
+    platform_name: str | None = None
+
+    rating: int | None = None
+    max_rating: int | None = None
+    #: rating 是多久以前抓的，用于提示数据新旧。
+    fetched_at: datetime | None = None
+
+
+class RatingResponse(BaseModel):
+    """某个平台的 rating 榜。
+
+    没有「全部平台」这个选项：各平台的 rating 不在同一把尺子上，混在一起
+    排序没有意义。
+    """
+
+    platform: str
+    label: str
+    entries: list[RatingEntry]
+    generated_at: int
+
+
+class DashboardAccount(BaseModel):
+    """面板上的一个平台账号。"""
+
+    platform: str
+    label: str
+    identifier: str
+    platform_name: str | None = None
+    verified: bool
+    rating: int | None = None
+    max_rating: int | None = None
+
+
+class DashboardSummary(BaseModel):
+    """个人数据面板。
+
+    一次请求给齐，避免首页开五个口子各自加载、各自闪一下。
+    """
+
+    #: 今天是哪个练习日（凌晨 4 点为界）。
+    practice_day: str
+
+    #: 今日、最近 7 天、累计的过题数。
+    today: int = 0
+    week: int = 0
+    total: int = 0
+
+    #: 最近 30 个练习日的每日过题数，从早到晚。
+    days: list[PracticeDay] = Field(default_factory=list)
+
+    #: 在练习榜上的名次（最近 7 天），未上榜时为 None。
+    practice_rank: int | None = None
+    #: 练习榜总人数，用于显示「3 / 20」。
+    practice_total: int = 0
+
+    accounts: list[DashboardAccount] = Field(default_factory=list)
+
+    #: 本周还剩几次手动刷新机会。
+    refresh_remaining: int = 0
+    refresh_limit: int = 0

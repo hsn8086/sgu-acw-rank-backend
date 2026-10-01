@@ -33,7 +33,11 @@ from ..models import (
 from ..schemas import (
     DailyPracticeEntry,
     DailyPracticeResponse,
+    DashboardAccount,
+    DashboardSummary,
     PracticeDay,
+    RatingEntry,
+    RatingResponse,
     SyncStatus,
 )
 from ..sync import current_practice_day, sync_account, sync_rating
@@ -282,3 +286,182 @@ def manual_refresh(
         "failures": failures,
         "remaining": max(0, RefreshQuota.WEEKLY_LIMIT - quota.used),
     }
+
+
+# --------------------------------------------------------------------------- #
+# rating 榜
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/rating", response_model=RatingResponse)
+def rating_board(
+    _current: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+    platform: str = Query(default=Platform.CODEFORCES),
+    include_retired: bool = Query(default=False),
+) -> RatingResponse:
+    """某个平台的 rating 榜。
+
+    这是旧 Codeforces rank 页的延续：那时 rating 由前端直接问 CF 拿，现在
+    后端每天缓存一次，页面只读缓存。
+
+    以账号为单位而不是以人为单位——一个人可以有主号和小号，两个号各有各的
+    rating，合并成一个数没有意义。
+
+    不提供「全部平台」：各平台的 rating 不在同一把尺子上（CF 的 1600 和
+    洛谷的 1600 完全不是一回事），混在一起排序会误导人。
+    """
+    if platform not in Platform.ALL:
+        raise ValueError("不支持的平台")
+
+    statement = select(Account).where(
+        Account.platform == platform,
+        Account.verified_at.is_not(None),  # type: ignore[union-attr]
+    )
+    accounts = list(db.exec(statement).all())
+
+    user_ids = {a.user_id for a in accounts}
+    users = {
+        user.id: user
+        for user in db.exec(select(User).where(User.id.in_(user_ids))).all()  # type: ignore[attr-defined]
+    }
+
+    entries: list[RatingEntry] = []
+    for account in accounts:
+        user = users.get(account.user_id)
+        if user is None:
+            continue
+        if not include_retired and user.status != UserStatus.ACTIVE:
+            continue
+        # 还没抓到 rating 的账号先不列出，否则会占着位置显示一个空值。
+        if account.rating is None:
+            continue
+
+        entries.append(
+            RatingEntry(
+                user_id=user.id,
+                display_name=user.display_name,
+                student_id=user.student_id,
+                enroll_year=user.enroll_year,
+                platform=account.platform,
+                identifier=account.identifier,
+                platform_name=account.display_name,
+                rating=account.rating,
+                max_rating=account.max_rating,
+                fetched_at=account.rating_fetched_at,
+            )
+        )
+
+    # 当前 rating 降序；并列看历史最高，再并列按年级和姓名稳定排序。
+    entries.sort(
+        key=lambda e: (
+            -(e.rating or 0),
+            -(e.max_rating or 0),
+            e.enroll_year,
+            e.display_name,
+        )
+    )
+    for index, entry in enumerate(entries, start=1):
+        entry.rank = index
+
+    return RatingResponse(
+        platform=platform,
+        label=Platform.LABELS[platform],
+        entries=entries,
+        generated_at=int(utcnow().timestamp()),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 个人数据面板
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/dashboard", response_model=DashboardSummary)
+def dashboard(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> DashboardSummary:
+    """首页用的个人数据面板。
+
+    一次请求给齐所有数字，而不是让前端分别去拉榜单再筛自己——那样首页会
+    开好几个请求、各自闪一下，而且要把别人的数据也传下来。
+
+    名次按最近 7 天的过题总量算，与练习榜的口径保持一致。
+    """
+    today = current_practice_day()
+    window = _recent_dates(30)
+    since = window[0]
+
+    accounts = list(
+        db.exec(
+            select(Account).where(
+                Account.user_id == current.id,
+                Account.verified_at.is_not(None),  # type: ignore[union-attr]
+            )
+        ).all()
+    )
+
+    account_ids = [a.id for a in accounts]
+    rows: list[DailyProgress] = []
+    if account_ids:
+        rows = list(
+            db.exec(
+                select(DailyProgress).where(
+                    DailyProgress.account_id.in_(account_ids),  # type: ignore[attr-defined]
+                    DailyProgress.date >= since,
+                )
+            ).all()
+        )
+
+    # 自己这 30 天，按天合并（主号小号相加）。
+    by_date: dict[str, int] = {}
+    for row in rows:
+        by_date[row.date] = by_date.get(row.date, 0) + row.solved_count
+
+    week_start = _recent_dates(7)[0]
+    week_total = sum(count for date, count in by_date.items() if date >= week_start)
+    today_total = by_date.get(today, 0)
+    window_total = sum(by_date.values())
+
+    # 名次：拿最近 7 天的榜单，找自己在哪。
+    rank_value: int | None = None
+    rank_total = 0
+    board = practice_rank(_current=current, db=db, days=7, platform=None, include_retired=False)
+    rank_total = len(board.entries)
+    for entry in board.entries:
+        if entry.user_id == current.id:
+            rank_value = entry.rank
+            break
+
+    quota_row = db.exec(
+        select(RefreshQuota).where(
+            RefreshQuota.user_id == current.id,
+            RefreshQuota.week_start == _current_week_start(),
+        )
+    ).first()
+    used = quota_row.used if quota_row else 0
+
+    return DashboardSummary(
+        practice_day=today,
+        today=today_total,
+        week=week_total,
+        total=window_total,
+        days=[PracticeDay(date=d, count=by_date.get(d, 0)) for d in window],
+        practice_rank=rank_value,
+        practice_total=rank_total,
+        accounts=[
+            DashboardAccount(
+                platform=a.platform,
+                label=Platform.LABELS.get(a.platform, a.platform),
+                identifier=a.identifier,
+                platform_name=a.display_name,
+                verified=a.verified_at is not None,
+                rating=a.rating,
+                max_rating=a.max_rating,
+            )
+            for a in accounts
+        ],
+        refresh_remaining=max(0, RefreshQuota.WEEKLY_LIMIT - used),
+        refresh_limit=RefreshQuota.WEEKLY_LIMIT,
+    )
