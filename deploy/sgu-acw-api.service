@@ -1,0 +1,30 @@
+[Unit]
+Description=SGU ACW member and ranking API
+Documentation=https://github.com/hsn8086/sgu-acw-rank-backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sgu-acw-api
+ExecStart=/opt/sgu-acw-api/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8091 --proxy-headers --forwarded-allow-ips=127.0.0.1
+EnvironmentFile=/etc/sgu-acw-api.env
+Restart=always
+RestartSec=2
+
+# 只监听回环，由 OpenResty 反代进来，所以对外不暴露端口。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+# 数据库目录是唯一需要写的地方。
+ReadWritePaths=/var/lib/sgu-acw
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
