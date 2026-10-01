@@ -1,0 +1,14 @@
+[Unit]
+Description=SGU ACW 数据库备份（定时）
+
+[Timer]
+# 每天一次。库只在成员注册、绑账号、同步抓取时变，日备足够。
+#
+# 03:00 UTC = 11:00 北京时间，避开凌晨的练习日切换（20:00 UTC）和
+# 同步任务的高峰。
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

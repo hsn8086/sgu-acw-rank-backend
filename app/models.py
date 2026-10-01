@@ -244,6 +244,14 @@ class Account(SQLModel, table=True):
     #: The ``SGU-xxxx`` string the member pastes into their platform profile.
     verify_token: str | None = Field(default=None, max_length=32)
     verify_expires_at: datetime | None = None
+    #: 上次尝试验证的时间。用于防抖：每次验证都要去平台读一次资料，连点不仅
+    #: 浪费请求，还可能把平台的 WAF 惹毛——那会连带影响所有人的抓取。
+    #:
+    #: 无论成功还是失败都记，否则失败时连点照样刷。
+    verify_attempted_at: datetime | None = None
+    #: 验证尝试次数。冷却时间随它翻倍，所以连点会被逐步拖慢，而不是永远
+    #: 十秒一次。只有验证成功才清零。
+    verify_attempts: int = Field(default=0)
 
     # ------------------------------------------------------------------ #
     # 缓存的平台数据
@@ -279,6 +287,21 @@ class Account(SQLModel, table=True):
     @property
     def is_verified(self) -> bool:
         return self.verified_at is not None
+
+    def verify_cooldown(self, *, base: int, cap: int) -> int:
+        """下一次验证要等多少秒。
+
+        随尝试次数翻倍：10s → 20s → 40s → … 封顶。单纯的固定冷却挡不住
+        「一天到晚慢慢点」，而这个会自然把人拖停：点到第十几次时已经要
+        等五分钟了。
+
+        只有验证成功才清零，所以换一个新验证码不会重置这个计数。
+        """
+        if self.verify_attempts <= 0:
+            return 0
+
+        shift = min(self.verify_attempts - 1, 16)  # 防止移位数过大
+        return min(base * (2**shift), cap)
 
     def sync_interval_seconds(self, *, now: datetime, base: int, cap: int) -> int:
         """这个账号现在该隔多久同步一次。

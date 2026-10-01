@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     # rating 只在打完比赛后变，一天一次足够。
     rating_interval_minutes: int = 24 * 60
 
+    # 验证尝试的最小间隔（秒），以及它的上限。
+    #
+    # 冷却随失败次数翻倍：10s → 20s → 40s → … 封顶。每次验证都要去平台读
+    # 一次资料，连点不仅浪费请求，还可能把平台的 WAF 惹毛——那会连带影响
+    # 所有人的抓取，不只是他自己。前端禁用按钮挡不住直接调接口的。
+    verify_cooldown_seconds: int = 10
+    verify_cooldown_max_seconds: int = 300
+
 
 @lru_cache
 def get_settings() -> Settings:

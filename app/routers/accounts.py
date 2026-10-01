@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..cleanup import delete_account_data
+from ..config import get_settings
 from ..db import get_session
 from ..deps import get_current_user, require_origin_secret
 from ..models import Account, Platform, User, utcnow
@@ -131,7 +132,12 @@ def verify_account(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> AccountVerifyResult:
-    """读平台签名，确认验证码在里面。"""
+    """读平台签名，确认验证码在里面。
+
+    带防抖：同一个账号在 ``verify_cooldown_seconds`` 内只能验一次。每次验证
+    都要去平台读一次资料，连点不仅浪费请求，还可能把平台的 WAF 惹毛——
+    那会连带影响所有人的抓取。前端禁用按钮挡不住直接调接口的。
+    """
     account = _own_account(db, user, account_id)
 
     if account.verified_at is not None:
@@ -142,6 +148,31 @@ def verify_account(
     if account.verify_expires_at and utcnow() >= account.verify_expires_at:
         raise HTTPException(status_code=400, detail="验证码已过期，请重新生成")
 
+    # 防抖。冷却时间随尝试次数翻倍，所以连点会被逐步拖慢，而不是永远十秒
+    # 一次。先扣冷却再发请求，这样即使后面网络出错也不会留下可以立即重试
+    # 的空档。
+    settings = get_settings()
+    now = utcnow()
+    if account.verify_attempted_at is not None:
+        cooldown = account.verify_cooldown(
+            base=settings.verify_cooldown_seconds,
+            cap=settings.verify_cooldown_max_seconds,
+        )
+        elapsed = (now - account.verify_attempted_at).total_seconds()
+        if elapsed < cooldown:
+            wait = int(cooldown - elapsed) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"操作太快，请等 {wait} 秒后再试",
+                # 标准的 429 响应头。前端的倒计时读它，就不用去解析中文提示。
+                headers={"Retry-After": str(wait)},
+            )
+
+    account.verify_attempted_at = now
+    account.verify_attempts += 1
+    db.add(account)
+    db.commit()
+
     ok, detail = check_signature(account.platform, account.identifier, account.verify_token)
     if not ok:
         return AccountVerifyResult(ok=False, detail=detail, account=account)
@@ -150,6 +181,8 @@ def verify_account(
     # 验证完就把码清掉，签名里那一行可以删了。
     account.verify_token = None
     account.verify_expires_at = None
+    # 成功才清零，所以换个新验证码不会把冷却重新计时。
+    account.verify_attempts = 0
     db.add(account)
     db.commit()
     db.refresh(account)

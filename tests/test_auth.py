@@ -939,3 +939,152 @@ def test_change_password_does_not_echo(client):
     )
     # 未登录是 401，但即使走到了校验也该抹掉。这里只断言响应里没有原值。
     assert marker not in response.text
+
+
+# --------------------------------------------------------------------------- #
+# 验证防抖
+# --------------------------------------------------------------------------- #
+
+
+def _bind_account(client, platform="codeforces", identifier="tester"):
+    """绑定一个账号，返回它的 id。"""
+    from unittest.mock import patch
+
+    from app.platforms import Profile
+
+    with patch(
+        "app.routers.accounts.fetch_profile",
+        return_value=Profile(platform=platform, identifier=identifier, signature=""),
+    ):
+        response = client.post(
+            "/api/accounts", json={"platform": platform, "identifier": identifier}
+        )
+    assert response.status_code == 201, response.text
+    return response.json()["id"]
+
+
+def test_verify_is_rate_limited(client, root_client):
+    """连点验证会被挡下。
+
+    每次验证都要去平台读一次资料。连点不仅浪费请求，还可能把平台的 WAF
+    惹毛——那会连带影响所有人的抓取，不只是他自己。
+    """
+    from unittest.mock import patch
+
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+    account_id = _bind_account(client)
+
+    with patch(
+        "app.routers.accounts.check_signature",
+        return_value=(False, "签名里没有找到验证码，请确认已保存"),
+    ):
+        first = client.post(f"/api/accounts/{account_id}/verify")
+        assert first.status_code == 200
+        assert first.json()["ok"] is False
+
+        # 立刻再来一次：应该被防抖挡下。
+        second = client.post(f"/api/accounts/{account_id}/verify")
+        assert second.status_code == 429
+        assert "太快" in second.json()["detail"]
+
+
+def test_verify_cooldown_grows_with_attempts(client, root_client):
+    """冷却随失败次数翻倍，所以一天到晚慢慢点也会被拖停。"""
+    from datetime import timedelta
+
+    from sqlmodel import Session
+
+    from app.config import get_settings
+    from app.db import get_engine
+    from app.models import Account
+
+    settings = get_settings()
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+    account_id = _bind_account(client)
+
+    with Session(get_engine()) as db:
+        account = db.get(Account, account_id)
+        # 模拟已经失败过几次。
+        account.verify_attempts = 4
+        account.verify_attempted_at = __import__("app.models", fromlist=["utcnow"]).utcnow()
+        db.add(account)
+        db.commit()
+
+        # 第 4 次之后的冷却是 80 秒；距上次尝试 30 秒，应该还被挡。
+        account.verify_attempted_at = account.verify_attempted_at - timedelta(seconds=30)
+        db.add(account)
+        db.commit()
+
+        expected = account.verify_cooldown(
+            base=settings.verify_cooldown_seconds,
+            cap=settings.verify_cooldown_max_seconds,
+        )
+        assert expected == settings.verify_cooldown_seconds * 8  # 10 * 2^3
+
+    response = client.post(f"/api/accounts/{account_id}/verify")
+    assert response.status_code == 429
+    # 提示要告诉他还差多久。
+    assert "秒" in response.json()["detail"]
+
+
+def test_successful_verify_resets_counter(client, root_client):
+    """验证成功要把计数清零，否则下次重新绑定要白等。"""
+    from unittest.mock import patch
+
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.models import Account
+
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+    account_id = _bind_account(client)
+
+    with patch("app.routers.accounts.check_signature", return_value=(True, "验证通过")):
+        response = client.post(f"/api/accounts/{account_id}/verify")
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+    with Session(get_engine()) as db:
+        account = db.get(Account, account_id)
+        assert account.verify_attempts == 0
+        assert account.verified_at is not None
+
+
+def test_renew_does_not_reset_cooldown(client, root_client):
+    """换个新验证码不该重置冷却，否则连点可以靠不停地 renew 绕过。"""
+    from unittest.mock import patch
+
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+    account_id = _bind_account(client)
+
+    with patch("app.routers.accounts.check_signature", return_value=(False, "没找到")):
+        assert client.post(f"/api/accounts/{account_id}/verify").status_code == 200
+
+    # 换一个新码。
+    assert client.post(f"/api/accounts/{account_id}/renew").status_code == 200
+
+    # 冷却仍然生效。
+    again = client.post(f"/api/accounts/{account_id}/verify")
+    assert again.status_code == 429
+
+
+def test_verified_account_is_not_rate_limited(client, root_client):
+    """已经验证过的账号查一下就走，不进冷却——否则界面刷新会莫名报错。"""
+    from unittest.mock import patch
+
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+    account_id = _bind_account(client)
+
+    with patch("app.routers.accounts.check_signature", return_value=(True, "验证通过")):
+        assert client.post(f"/api/accounts/{account_id}/verify").json()["ok"] is True
+
+    # 连查三次，每次都是「已经验证过了」，不该触发 429。
+    for _ in range(3):
+        response = client.post(f"/api/accounts/{account_id}/verify")
+        assert response.status_code == 200
+        assert "已经验证过" in response.json()["detail"]

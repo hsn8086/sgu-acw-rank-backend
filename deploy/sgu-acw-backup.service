@@ -1,0 +1,25 @@
+[Unit]
+Description=SGU ACW 数据库备份
+Documentation=https://github.com/hsn8086/sgu-acw-rank-backend
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sgu-acw-api
+# 保留最近 14 份。库很小（百 KB 级），留两周的日备不会占多少地方。
+ExecStart=/opt/sgu-acw-api/.venv/bin/python -m app.backup --keep 14
+EnvironmentFile=/etc/sgu-acw-api.env
+
+TimeoutStartSec=300
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sgu-acw
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
