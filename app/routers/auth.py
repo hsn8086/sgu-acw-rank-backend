@@ -133,6 +133,7 @@ def register(
             level=parsed.level,
             college_code=parsed.college_code,
             major_code=parsed.major_code,
+            class_no=parsed.class_no,
             role=invite.grants_role,
             status=UserStatus.ACTIVE,
             created_at=utcnow(),

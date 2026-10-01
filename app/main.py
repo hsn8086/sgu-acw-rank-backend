@@ -92,6 +92,7 @@ def bootstrap_root() -> None:
                 level=parsed.level if parsed else 0,
                 college_code=parsed.college_code if parsed else "00",
                 major_code=parsed.major_code if parsed else "00",
+                class_no=parsed.class_no if parsed else 0,
                 role=Role.ROOT,
                 admin_note="首次启动自动创建",
                 created_at=utcnow(),

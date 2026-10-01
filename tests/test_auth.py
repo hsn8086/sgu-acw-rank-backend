@@ -1154,3 +1154,60 @@ def test_unknown_college_code_yields_none():
     assert college_name(None) is None
     assert major_name("99", "01") is None
     assert major_name("25", "99") is None
+
+
+# --------------------------------------------------------------------------- #
+# 班级
+# --------------------------------------------------------------------------- #
+
+
+def test_class_is_parsed_and_exposed(client, root_client):
+    """学号第 8 位是班级序号，要解析并显示。
+
+    单独一个「3 班」没有意义——得知道是哪个专业的 3 班。所以 class_label
+    是专业加序号拼出来的。
+    """
+    invite = _make_invite(root_client)
+    # 25125023 003 → 学院 25 / 专业 02 / 3 班
+    created = _register(client, invite["code"], student_id="25125023003").json()
+
+    assert created["class_no"] == 3
+    assert created["class_label"] == "软件工程 3 班"
+
+
+def test_rating_board_shows_college_and_class(client, root_client):
+    """rating 榜也要带学院、专业、班级。
+
+    与练习量榜保持一致，否则同一个页面切个维度就少了一半信息。
+    """
+    from unittest.mock import patch
+
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.models import Account, utcnow
+    from app.platforms import Profile
+
+    invite = _make_invite(root_client)
+    _register(client, invite["code"], student_id="25125023003")
+
+    with patch(
+        "app.routers.accounts.fetch_profile",
+        return_value=Profile(platform="codeforces", identifier="tester", signature=""),
+    ):
+        account = client.post(
+            "/api/accounts", json={"platform": "codeforces", "identifier": "tester"}
+        ).json()
+
+    with Session(get_engine()) as db:
+        row = db.get(Account, account["id"])
+        row.verified_at = utcnow()
+        row.rating = 1500
+        db.add(row)
+        db.commit()
+
+    board = root_client.get("/api/practice/rating?platform=codeforces").json()
+    entry = board["entries"][0]
+    assert entry["college_name"] == "信息工程学院"
+    assert entry["major_name"] == "软件工程"
+    assert entry["class_label"] == "软件工程 3 班"

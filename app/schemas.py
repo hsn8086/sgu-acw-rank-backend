@@ -26,9 +26,12 @@ class UserPublic(BaseModel):
     level: int
     college_code: str
     major_code: str
+    #: 班级序号。单独的「3 班」没有意义，所以 class_label 是专业加序号。
+    class_no: int = 0
     #: 学院名与专业名。管理员可改，所以可能跟自己的学号码对不上。
     college_name: str | None = None
     major_name: str | None = None
+    class_label: str | None = None
     role: str
     status: str
     created_at: datetime
@@ -293,6 +296,7 @@ class DailyPracticeEntry(BaseModel):
     major_code: str = ""
     college_name: str | None = None
     major_name: str | None = None
+    class_label: str | None = None
 
     #: 统计窗口内的过题总数。
     total: int = 0
@@ -334,6 +338,13 @@ class RatingEntry(BaseModel):
     student_id: str
     enroll_year: int
     rank: int = 0
+
+    #: 学院、专业、班级。与练习量榜保持一致，免得两个维度显示的信息不一样。
+    college_code: str = ""
+    major_code: str = ""
+    college_name: str | None = None
+    major_name: str | None = None
+    class_label: str | None = None
 
     platform: str
     identifier: str

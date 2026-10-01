@@ -76,6 +76,8 @@ class User(SQLModel, table=True):
     level: int
     college_code: str = Field(max_length=4)
     major_code: str = Field(max_length=4)
+    #: 班级序号，学号第 8 位。与学院专业一起才是完整班级，如「软件工程 3 班」。
+    class_no: int = Field(default=0)
 
     #: 学院名与专业名的**人工覆盖值**。为空时按学号里的码查表。
     #:
@@ -118,6 +120,18 @@ class User(SQLModel, table=True):
     def major_name(self) -> str | None:
         """专业名。同上。"""
         return self.major_override or academic.major_name(self.college_code, self.major_code)
+
+    @property
+    def class_label(self) -> str | None:
+        """班级，如「软件工程 3 班」。
+
+        单独一个「3 班」没有意义——得知道是哪个专业的 3 班。所以这里是专业
+        加序号拼出来的，而不是只返回序号。
+        """
+        if not self.class_no:
+            return None
+        major = self.major_name
+        return f"{major} {self.class_no} 班" if major else f"{self.class_no} 班"
 
     @property
     def is_active(self) -> bool:

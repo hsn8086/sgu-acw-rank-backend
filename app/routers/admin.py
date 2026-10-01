@@ -229,6 +229,7 @@ def create_user(
         level=parsed.level,
         college_code=parsed.college_code,
         major_code=parsed.major_code,
+        class_no=parsed.class_no,
         role=payload.role,
         status=UserStatus.ACTIVE,
         admin_note=payload.admin_note,
