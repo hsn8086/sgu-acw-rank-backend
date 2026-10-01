@@ -1,0 +1,250 @@
+"""每日练习量统计的测试。
+
+重点覆盖两件容易错的事：
+
+* 一个人在同一平台绑了多个账号时，两个账号的题数要相加而不是互相覆盖。
+* 重复同步不能重复计数。CF/AtCoder 的提交带时间戳，按日覆盖写；洛谷靠
+  快照差分，第一次只建基线不产生增量。
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+import pytest
+from sqlmodel import Session, select
+
+from app.db import get_engine
+from app.models import Account, DailyProgress, Platform, SolvedSnapshot, User, utcnow
+from app.platforms import SolvedSet
+from app.sync import CST, _apply_diff, _apply_timestamped, sync_account
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("SGU_ACW_DATABASE_URL", f"sqlite:///{tmp_path / 'sync.db'}")
+    monkeypatch.setenv("SGU_ACW_SCRYPT_N", "1024")
+
+    from app import db as db_module
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    db_module.reset_engine()
+
+    from app.db import init_db
+
+    init_db()
+    yield
+    db_module.reset_engine()
+    get_settings.cache_clear()
+
+
+def _make_user(db: Session, student_id: str, name: str) -> User:
+    user = User(
+        student_id=student_id,
+        password_hash="x",
+        display_name=name,
+        enroll_year=2024,
+        level=1,
+        college_code="25",
+        major_code="02",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def _make_account(
+    db: Session, user: User, identifier: str, platform: str = Platform.CODEFORCES
+) -> Account:
+    account = Account(
+        user_id=user.id,
+        platform=platform,
+        identifier=identifier,
+        verified_at=utcnow(),
+    )
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+def _epoch(days_ago: int, hour: int = 12) -> int:
+    """东八区某天某点的 epoch 秒。"""
+    target = (utcnow().astimezone(CST) - timedelta(days=days_ago)).replace(
+        hour=hour, minute=0, second=0, microsecond=0
+    )
+    return int(target.timestamp())
+
+
+def _day(days_ago: int) -> str:
+    return (utcnow().astimezone(CST) - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+
+
+def _progress(db: Session, account: Account, date: str) -> int:
+    row = db.exec(
+        select(DailyProgress).where(
+            DailyProgress.account_id == account.id, DailyProgress.date == date
+        )
+    ).first()
+    return row.solved_count if row else 0
+
+
+def test_timestamped_writes_per_day(env):
+    """有时间的平台按天归档。"""
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+
+        solved = SolvedSet(
+            platform=Platform.CODEFORCES,
+            identifier="alpha",
+            problems={"a": _epoch(1), "b": _epoch(1), "c": _epoch(2)},
+        )
+        _apply_timestamped(db, account, solved)
+        db.commit()
+
+        assert _progress(db, account, _day(1)) == 2
+        assert _progress(db, account, _day(2)) == 1
+
+
+def test_timestamped_is_idempotent(env):
+    """同一份数据同步两次，计数不变。"""
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+        solved = SolvedSet(
+            platform=Platform.CODEFORCES,
+            identifier="alpha",
+            problems={"a": _epoch(1), "b": _epoch(1)},
+        )
+
+        _apply_timestamped(db, account, solved)
+        db.commit()
+        first = _progress(db, account, _day(1))
+
+        _apply_timestamped(db, account, solved)
+        db.commit()
+        assert _progress(db, account, _day(1)) == first == 2
+
+
+def test_two_accounts_same_user_do_not_overwrite(env):
+    """同一个人两个账号，各记各的，互不覆盖。
+
+    这是按账号而非按人建键的原因：按人建键的话，后同步的账号会把先前的
+    覆盖掉，总量凭空少一半。
+    """
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        main = _make_account(db, user, "main")
+        alt = _make_account(db, user, "alt")
+
+        _apply_timestamped(
+            db, main, SolvedSet(Platform.CODEFORCES, "main", {"a": _epoch(1), "b": _epoch(1)})
+        )
+        _apply_timestamped(db, alt, SolvedSet(Platform.CODEFORCES, "alt", {"c": _epoch(1)}))
+        db.commit()
+
+        assert _progress(db, main, _day(1)) == 2
+        assert _progress(db, alt, _day(1)) == 1
+
+        # 按人汇总时应当是 3。
+        rows = db.exec(select(DailyProgress).where(DailyProgress.date == _day(1))).all()
+        assert sum(r.solved_count for r in rows) == 3
+
+
+def test_diff_first_sync_creates_baseline_only(env):
+    """洛谷首次同步只建基线，不产生增量。
+
+    否则会把一个人几年的积累全算到今天。
+    """
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "1425874", platform=Platform.LUOGU)
+
+        added = _apply_diff(
+            db,
+            account,
+            SolvedSet(Platform.LUOGU, "1425874", {"P1001": 0, "P1002": 0, "P1003": 0}),
+        )
+        db.commit()
+
+        assert added == 0
+        rows = db.exec(select(DailyProgress).where(DailyProgress.account_id == account.id)).all()
+        assert rows == []
+
+        snapshot = db.exec(
+            select(SolvedSnapshot).where(SolvedSnapshot.account_id == account.id)
+        ).one()
+        assert snapshot.problem_count == 3
+
+
+def test_diff_second_sync_counts_new_problems(env):
+    """第二次同步多出来的题记为增量。"""
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "1425874", platform=Platform.LUOGU)
+
+        _apply_diff(db, account, SolvedSet(Platform.LUOGU, "1425874", {"P1": 0, "P2": 0}))
+        db.commit()
+
+        added = _apply_diff(
+            db, account, SolvedSet(Platform.LUOGU, "1425874", {"P1": 0, "P2": 0, "P3": 0, "P4": 0})
+        )
+        db.commit()
+
+        assert added == 2
+        total = sum(
+            r.solved_count
+            for r in db.exec(
+                select(DailyProgress).where(DailyProgress.account_id == account.id)
+            ).all()
+        )
+        assert total == 2
+
+
+def test_diff_with_no_change_adds_nothing(env):
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "1425874", platform=Platform.LUOGU)
+
+        _apply_diff(db, account, SolvedSet(Platform.LUOGU, "1425874", {"P1": 0}))
+        db.commit()
+        added = _apply_diff(db, account, SolvedSet(Platform.LUOGU, "1425874", {"P1": 0}))
+        db.commit()
+
+        assert added == 0
+
+
+def test_sync_account_reports_fetch_failure(env, monkeypatch):
+    """抓取失败时返回失败而不是抛异常，让同步继续跑完其他账号。"""
+    from app.platforms import FetchError
+
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "ghost")
+
+        def boom(platform, identifier):
+            raise FetchError("平台上没有这个用户", not_found=True)
+
+        monkeypatch.setattr("app.sync.fetch_solved", boom)
+        ok, detail, added = sync_account(db, account)
+
+        assert ok is False
+        assert "没有这个用户" in detail
+        assert added == 0
+
+
+def test_day_boundary_uses_east_eight(env):
+    """按东八区切日：UTC 深夜的提交算作北京时间第二天。"""
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+
+        # 北京时间今天 01:00 = UTC 昨天 17:00。按 UTC 分会算到昨天。
+        solved = SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(0, hour=1)})
+        _apply_timestamped(db, account, solved)
+        db.commit()
+
+        assert _progress(db, account, _day(0)) == 1

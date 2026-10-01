@@ -1,0 +1,212 @@
+"""平台账号的绑定与验证。
+
+流程是「先声明、再证明」：
+
+1. 成员提交平台与标识（handle 或 uid），后端生成一个 ``SGU-xxxx`` 验证码
+   并记下有效期，此时账号处于未验证状态。
+2. 成员把这个码填到自己在该平台的签名里（CF 的 organization、AtCoder 的
+   Affiliation、洛谷的 slogan、牛客的 coder-brief）。
+3. 成员点验证，后端去读那份签名，看到码就算通过。
+
+这样证明的是「这个人控制那个账号」，而不是「这个人是韶关学院的」——后者
+需要学校配合，前者正是绑定时真正需要确认的事。
+
+校验用「包含」而非「相等」，因为成员的签名里往往本来就有别的内容。
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
+
+from ..db import get_session
+from ..deps import get_current_user, require_origin_secret
+from ..models import Account, Platform, User, utcnow
+from ..platforms import FetchError, check_signature, fetch_profile
+from ..schemas import (
+    AccountCreate,
+    AccountPublic,
+    AccountVerifyResult,
+    UserPublic,
+)
+from ..security import new_verify_token
+
+router = APIRouter(
+    prefix="/accounts",
+    tags=["accounts"],
+    dependencies=[Depends(require_origin_secret)],
+)
+
+#: 验证码的有效期。够成员去平台改一次签名，又不至于长期挂着。
+VERIFY_TTL_HOURS = 24
+
+
+def _own_account(db: Session, user: User, account_id: int) -> Account:
+    account = db.get(Account, account_id)
+    if account is None or account.user_id != user.id:
+        # 不区分「不存在」和「不是你的」，避免探测别人有哪些账号。
+        raise HTTPException(status_code=404, detail="账号不存在")
+    return account
+
+
+@router.get("", response_model=list[AccountPublic])
+def list_my_accounts(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> list[Account]:
+    statement = (
+        select(Account)
+        .where(Account.user_id == user.id)
+        .order_by(Account.platform, Account.created_at)  # type: ignore[attr-defined]
+    )
+    return list(db.exec(statement).all())
+
+
+@router.post("", response_model=AccountPublic, status_code=status.HTTP_201_CREATED)
+def add_account(
+    payload: AccountCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> Account:
+    """声明一个平台账号，并返回待填入的验证码。
+
+    此时只确认了「这个标识在平台上存在」，归属尚未证明，所以
+    ``verified_at`` 仍为空。
+    """
+    if payload.platform not in Platform.ALL:
+        raise HTTPException(status_code=400, detail="不支持的平台")
+
+    identifier = payload.identifier.strip()
+    if not identifier:
+        raise HTTPException(status_code=400, detail="请填写账号标识")
+
+    # 先确认账号真实存在，避免把拼错的名字存进库。洛谷接受用户名，会顺手
+    # 换成 uid。
+    #
+    # 必须先抓取再查重：成员输入的是用户名，而库里存的是 uid，拿原始输入
+    # 去比对会漏掉，等到插入时才被唯一约束拦住，那时只能回一个 500。
+    try:
+        profile = fetch_profile(payload.platform, identifier)
+    except FetchError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # 唯一约束是 (platform, identifier)：同一平台同一账号只能属于一个人。
+    existing = db.exec(
+        select(Account).where(
+            Account.platform == payload.platform,
+            Account.identifier == profile.identifier,
+        )
+    ).first()
+    if existing is not None:
+        if existing.user_id == user.id:
+            raise HTTPException(status_code=409, detail="你已经绑过这个账号了")
+        raise HTTPException(status_code=409, detail="这个账号已被其他成员绑定")
+
+    account = Account(
+        user_id=user.id,
+        platform=payload.platform,
+        identifier=profile.identifier,
+        verify_token=new_verify_token(),
+        verify_expires_at=utcnow() + timedelta(hours=VERIFY_TTL_HOURS),
+        created_at=utcnow(),
+    )
+    db.add(account)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # 两个成员同时绑同一个账号时，上面的查重会双双通过，由唯一约束兜底。
+        db.rollback()
+        raise HTTPException(status_code=409, detail="这个账号已被其他成员绑定") from exc
+    db.refresh(account)
+    return account
+
+
+@router.post("/{account_id}/verify", response_model=AccountVerifyResult)
+def verify_account(
+    account_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> AccountVerifyResult:
+    """读平台签名，确认验证码在里面。"""
+    account = _own_account(db, user, account_id)
+
+    if account.verified_at is not None:
+        return AccountVerifyResult(ok=True, detail="这个账号已经验证过了", account=account)
+
+    if not account.verify_token:
+        raise HTTPException(status_code=400, detail="请先重新生成验证码")
+    if account.verify_expires_at and utcnow() >= account.verify_expires_at:
+        raise HTTPException(status_code=400, detail="验证码已过期，请重新生成")
+
+    ok, detail = check_signature(account.platform, account.identifier, account.verify_token)
+    if not ok:
+        return AccountVerifyResult(ok=False, detail=detail, account=account)
+
+    account.verified_at = utcnow()
+    # 验证完就把码清掉，签名里那一行可以删了。
+    account.verify_token = None
+    account.verify_expires_at = None
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+
+    return AccountVerifyResult(ok=True, detail="验证通过", account=account)
+
+
+@router.post("/{account_id}/renew", response_model=AccountPublic)
+def renew_token(
+    account_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> Account:
+    """换一个新的验证码。用于码过期或填错后重来。"""
+    account = _own_account(db, user, account_id)
+    if account.verified_at is not None:
+        raise HTTPException(status_code=400, detail="这个账号已经验证过了")
+
+    account.verify_token = new_verify_token()
+    account.verify_expires_at = utcnow() + timedelta(hours=VERIFY_TTL_HOURS)
+    db.add(account)
+    db.commit()
+    db.refresh(account)
+    return account
+
+
+@router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_account(
+    account_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> None:
+    account = _own_account(db, user, account_id)
+    db.delete(account)
+    db.commit()
+
+
+# --------------------------------------------------------------------------- #
+# 给其他成员看的视角
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/of/{user_id}", response_model=list[AccountPublic])
+def accounts_of(
+    user_id: int,
+    _current: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> list[Account]:
+    """看某个成员的账号。只返回已验证的，未验证的属于半成品状态。
+
+    登录才能看，与成员目录一致：榜单页需要展示这些 handle。
+    """
+    statement = (
+        select(Account)
+        .where(Account.user_id == user_id, Account.verified_at.is_not(None))  # type: ignore[union-attr]
+        .order_by(Account.platform)  # type: ignore[attr-defined]
+    )
+    return list(db.exec(statement).all())
+
+
+__all__ = ["router", "UserPublic"]

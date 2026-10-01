@@ -205,3 +205,71 @@ class Account(SQLModel, table=True):
     @property
     def is_verified(self) -> bool:
         return self.verified_at is not None
+
+
+class SolvedSnapshot(SQLModel, table=True):
+    """某账号最近一次抓到的已过题目集合。
+
+    只对没有时间戳的平台有意义：洛谷只给出累计通过的题目集合，拿不到
+    「什么时候过的」。于是每次同步时与上一份快照比对，多出来的题就算作
+    这次同步之前那段时间的新增。CF 和 AtCoder 有时间戳，不需要这张表，
+    但也会存一份，便于排查抓取是否正常。
+    """
+
+    __tablename__ = "solved_snapshots"
+
+    id: int | None = Field(default=None, primary_key=True)
+    account_id: int = Field(foreign_key="accounts.id", unique=True, index=True)
+
+    #: 题目标识的 JSON 数组。
+    problems_json: str = Field(default="[]")
+    problem_count: int = Field(default=0)
+
+    fetched_at: datetime = Field(default_factory=utcnow)
+    #: 上一次抓取的时间，用于判断两次抓取之间隔了多久。
+    previous_fetched_at: datetime | None = None
+
+
+class DailyProgress(SQLModel, table=True):
+    """每个平台账号每天的过题数。榜单直接读这张表，不再实时抓平台。
+
+    键是「账号 + 日期」而不是「人 + 平台 + 日期」：一个成员在同一平台
+    可以绑多个账号（主号加小号），按人作键的话两个账号会互相覆盖，
+    只留下最后同步的那个。展示时再按人汇总。
+
+    日期按东八区切分：成员说的「今天」是北京时间，而 CF 和 AtCoder 的
+    时间戳是 UTC，直接按 UTC 分日会让晚上的提交算到第二天。
+    """
+
+    __tablename__ = "daily_progress"
+    __table_args__ = (UniqueConstraint("account_id", "date", name="uq_progress_account_date"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    account_id: int = Field(foreign_key="accounts.id", index=True)
+
+    platform: str = Field(max_length=16, index=True)
+    #: YYYY-MM-DD，东八区。
+    date: str = Field(max_length=10, index=True)
+    solved_count: int = Field(default=0)
+
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class SyncRun(SQLModel, table=True):
+    """一次同步的记录，用来在管理页展示「上次同步是什么时候、有没有出错」。"""
+
+    __tablename__ = "sync_runs"
+
+    id: int | None = Field(default=None, primary_key=True)
+    started_at: datetime = Field(default_factory=utcnow)
+    finished_at: datetime | None = None
+
+    account_count: int = Field(default=0)
+    ok_count: int = Field(default=0)
+    error_count: int = Field(default=0)
+    #: 出错账号的说明，JSON 数组。
+    errors_json: str = Field(default="[]")
+
+    @property
+    def is_running(self) -> bool:
+        return self.finished_at is None

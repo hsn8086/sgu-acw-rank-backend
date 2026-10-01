@@ -144,3 +144,96 @@ class UpdateUserAdminRequest(BaseModel):
         if value is not None and value not in ("active", "disabled"):
             raise ValueError("未知的状态")
         return value
+
+
+class AccountPublic(BaseModel):
+    """一个平台账号。未验证的也会返回，好让成员看到待办状态。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    platform: str
+    identifier: str
+    verified_at: datetime | None
+    #: 仅在未验证时出现，用于告诉成员该把什么填进签名。
+    verify_token: str | None = None
+    verify_expires_at: datetime | None = None
+    created_at: datetime
+
+
+class AccountCreate(BaseModel):
+    platform: str = Field(min_length=1, max_length=16)
+    #: Codeforces/AtCoder 的 handle，或洛谷/牛客的 uid。洛谷也接受用户名。
+    identifier: str = Field(min_length=1, max_length=64)
+
+
+class AccountVerifyResult(BaseModel):
+    ok: bool
+    detail: str
+    account: AccountPublic | None = None
+
+
+class RankEntry(BaseModel):
+    """榜单的一行。一个人可能有多个账号，所以以账号为单位而非以人为单位。"""
+
+    user_id: int
+    display_name: str
+    student_id: str
+    enroll_year: int
+    platform: str
+    identifier: str
+    rank: int = 0
+
+    rating: int | None = None
+    max_rating: int | None = None
+    #: 平台上的显示名，可能与 identifier 不同。
+    platform_name: str | None = None
+    #: 抓取失败的原因。有值时其余数据为空，界面照常显示这一行但标注异常。
+    error: str | None = None
+
+
+class RankResponse(BaseModel):
+    platform: str
+    entries: list[RankEntry]
+    fetched_at: int
+    cache_ttl: int
+
+
+class PracticeDay(BaseModel):
+    date: str
+    count: int
+
+
+class DailyPracticeEntry(BaseModel):
+    """每日练习榜的一行，以人为单位（同平台多个账号已合并）。"""
+
+    user_id: int
+    display_name: str
+    student_id: str
+    enroll_year: int
+    rank: int = 0
+
+    #: 统计窗口内的过题总数。
+    total: int = 0
+    #: 窗口内每一天的数量，顺序与 dates 一致，缺失的补 0。
+    days: list[PracticeDay] = Field(default_factory=list)
+
+
+class DailyPracticeResponse(BaseModel):
+    days: int
+    platform: str | None
+    #: 窗口内的日期，从早到晚。
+    dates: list[str]
+    entries: list[DailyPracticeEntry]
+    generated_at: int
+
+
+class SyncStatus(BaseModel):
+    has_run: bool
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    account_count: int = 0
+    ok_count: int = 0
+    error_count: int = 0
+    #: 失败账号的说明，供管理员排查。
+    errors: list[str] = Field(default_factory=list)
