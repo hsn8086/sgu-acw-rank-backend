@@ -64,6 +64,11 @@ LINKED_COLLEGE_CODES: frozenset[str] = frozenset({"94", "95", "96", "97"})
 _ID_RE = re.compile(r"^(\d{2})(\d)(\d{2})(\d{2})(\d)(\d{3})([A-Z])?$")
 
 
+#: root 账号的学号。十一个 0 不是合法学号——学院码 00 不在集合里，所以别人
+#: 注册不到这个号。root 不走学号解析，创建时直接填占位值。
+ROOT_STUDENT_ID = "00000000000"
+
+
 @dataclass(frozen=True, slots=True)
 class StudentId:
     """A parsed student id.
@@ -129,6 +134,11 @@ def parse_student_id(value: str) -> StudentId:
         serial=int(serial),
         link_letter=letter,
     )
+
+
+def is_root_student_id(value: str) -> bool:
+    """是否是 root 的占位学号。"""
+    return (value or "").strip() == ROOT_STUDENT_ID
 
 
 def is_valid_student_id(value: str) -> bool:

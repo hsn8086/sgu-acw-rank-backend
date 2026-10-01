@@ -22,7 +22,7 @@ from .deps import require_origin_secret
 from .models import Role, User, utcnow
 from .routers import accounts, admin, auth, meta, practice, users
 from .security import hash_password
-from .student_id import StudentIdError, parse_student_id
+from .student_id import ROOT_STUDENT_ID, StudentIdError, is_root_student_id, parse_student_id
 
 logger = logging.getLogger("sgu_acw")
 
@@ -34,38 +34,52 @@ def bootstrap_root() -> None:
 
     Idempotent: once the student id exists this does nothing, so a restart never
     resets the password of an account that has been in use.
+
+    root 的学号是十一个 0，不是真实学号——它不占用任何人的号，也不会跟人
+    撞号。因此这里不跑学号解析，年级学院都填占位值。
     """
     settings = get_settings()
-    if not (settings.bootstrap_root_student_id and settings.bootstrap_root_password):
+    if not settings.bootstrap_root_password:
         return
 
-    try:
-        parsed = parse_student_id(settings.bootstrap_root_student_id)
-    except StudentIdError:
-        logger.error("bootstrap root student id is not a valid SGU student id; skipping")
-        return
+    student_id = (settings.bootstrap_root_student_id or ROOT_STUDENT_ID).strip()
+
+    # 配了真实学号时仍然解析，方便从旧配置平滑过渡；但推荐用占位号。
+    if is_root_student_id(student_id):
+        parsed = None
+    else:
+        try:
+            parsed = parse_student_id(student_id)
+        except StudentIdError:
+            logger.error(
+                "bootstrap root student id %r is not valid; falling back to %s",
+                student_id,
+                ROOT_STUDENT_ID,
+            )
+            student_id = ROOT_STUDENT_ID
+            parsed = None
 
     with Session(get_engine()) as db:
-        existing = db.exec(select(User).where(User.student_id == parsed.raw)).first()
+        existing = db.exec(select(User).where(User.student_id == student_id)).first()
         if existing is not None:
             return
 
         db.add(
             User(
-                student_id=parsed.raw,
+                student_id=student_id,
                 password_hash=hash_password(settings.bootstrap_root_password),
                 display_name="root",
-                enroll_year=parsed.enroll_year,
-                level=parsed.level,
-                college_code=parsed.college_code,
-                major_code=parsed.major_code,
+                enroll_year=parsed.enroll_year if parsed else 0,
+                level=parsed.level if parsed else 0,
+                college_code=parsed.college_code if parsed else "00",
+                major_code=parsed.major_code if parsed else "00",
                 role=Role.ROOT,
                 admin_note="首次启动自动创建",
                 created_at=utcnow(),
             )
         )
         db.commit()
-        logger.info("created bootstrap root account %s", parsed.raw)
+        logger.info("created bootstrap root account %s", student_id)
 
 
 @asynccontextmanager

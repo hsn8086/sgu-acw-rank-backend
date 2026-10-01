@@ -97,3 +97,24 @@ def test_level_name():
     assert parse_student_id("24125023005").level_name == "普通本科"
     assert parse_student_id("21251044001").level_name == "专科"
     assert parse_student_id("23303011001").level_name == "专升本/协同育人"
+
+
+def test_root_student_id_is_not_a_valid_student_id():
+    """root 的占位学号必须无法通过校验。
+
+    否则别人能拿它注册，把 root 这个身份占掉。十一个 0 的学院码是 00，
+    不在合法集合里，所以天然注册不了。
+    """
+    from app.student_id import ROOT_STUDENT_ID, is_root_student_id
+
+    assert ROOT_STUDENT_ID == "00000000000"
+    assert is_root_student_id(ROOT_STUDENT_ID)
+    assert not is_valid_student_id(ROOT_STUDENT_ID)
+
+
+def test_root_student_id_helper_handles_padding():
+    from app.student_id import is_root_student_id
+
+    assert is_root_student_id("  00000000000  ")
+    assert not is_root_student_id("24125023005")
+    assert not is_root_student_id("")

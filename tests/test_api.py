@@ -115,3 +115,38 @@ def test_bootstrap_root_creates_account(tmp_path, monkeypatch):
 
     db_module.reset_engine()
     get_settings.cache_clear()
+
+
+def test_bootstrap_root_uses_placeholder_student_id(tmp_path, monkeypatch):
+    """不配学号时，root 用十一个 0 这个占位号。
+
+    它不是真实学号，所以不占用任何人的号段；而且学院码 00 非法，别人也
+    注册不到它。
+    """
+    monkeypatch.setenv("SGU_ACW_DATABASE_URL", f"sqlite:///{tmp_path / 'root2.db'}")
+    monkeypatch.setenv("SGU_ACW_ORIGIN_SECRET", "")
+    monkeypatch.setenv("SGU_ACW_BOOTSTRAP_ROOT_PASSWORD", "rootpass123")
+    monkeypatch.delenv("SGU_ACW_BOOTSTRAP_ROOT_STUDENT_ID", raising=False)
+
+    from app import db as db_module
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    db_module.reset_engine()
+
+    from app.main import create_app
+
+    with TestClient(create_app()) as c:
+        # 用占位学号能登录。
+        login = c.post(
+            "/api/auth/login",
+            json={"student_id": "00000000000", "password": "rootpass123"},
+        )
+        assert login.status_code == 200, login.text
+        assert login.json()["role"] == "root"
+        assert login.json()["student_id"] == "00000000000"
+        # 年级是占位的 0，前端会显示成空白而不是「0 级」。
+        assert login.json()["enroll_year"] == 0
+
+    db_module.reset_engine()
+    get_settings.cache_clear()

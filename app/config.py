@@ -9,6 +9,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .student_id import ROOT_STUDENT_ID
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -34,9 +36,12 @@ class Settings(BaseSettings):
     # directly. Empty disables the check (local development).
     origin_secret: str = ""
 
-    # First-run bootstrap. When both are set and no user carries this student id
-    # yet, a root account is created. Ignored on every later start.
-    bootstrap_root_student_id: str = ""
+    # First-run bootstrap. When the password is set and no user carries this
+    # student id yet, a root account is created. Ignored on every later start.
+    #
+    # 学号默认是十一个 0——那不是合法学号，所以没人能注册到它，也不会占掉
+    # 真实号段。留空就用这个默认值。
+    bootstrap_root_student_id: str = ROOT_STUDENT_ID
     bootstrap_root_password: str = ""
 
     # Scrypt work factor. n must be a power of two; 2**14 keeps a login around
