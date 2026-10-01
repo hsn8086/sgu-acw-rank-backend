@@ -834,3 +834,88 @@ def test_zombie_account_gets_few_requests(env):
     assert per_day < 1
     # 对比：如果跟着活跃的主号走（15 分钟），一天是 96 次。
     assert per_day < 96 / 10
+
+
+# --------------------------------------------------------------------------- #
+# Codeforces 的签名字段
+# --------------------------------------------------------------------------- #
+
+
+def test_codeforces_signature_reads_multiple_fields():
+    """CF 的验证码可以填在名字、姓氏、城市任意一处。
+
+    不能用 organization：那是个选择器，会要求从已有组织里选或者新建一个，
+    填不进任意文本。而名字、姓氏、城市都是自由文本。
+
+    读多个字段是因为它们各有各的用途：有人拿 lastName 放真姓氏（xie），
+    有人用 city（Shantou）。全算上就不会强迫成员改掉真实信息。
+    """
+    from app.platforms import fetch_codeforces
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "result": [
+                    {
+                        "handle": "tester",
+                        "firstName": "Gennady",
+                        "lastName": "Korotkevich",
+                        "city": "Gomel",
+                        "organization": "ITMO University",
+                    }
+                ],
+            }
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    profile = fetch_codeforces(FakeClient(), "tester")
+    for expected in ["Gennady", "Korotkevich", "Gomel", "ITMO University"]:
+        assert expected in profile.signature
+
+
+def test_codeforces_signature_skips_missing_fields():
+    """没填的字段不该在签名里留下空行。"""
+    from app.platforms import fetch_codeforces
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "status": "OK",
+                "result": [{"handle": "tester", "lastName": "SGU-ABCD"}],
+            }
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    profile = fetch_codeforces(FakeClient(), "tester")
+    assert profile.signature == "SGU-ABCD"
+    assert "\n\n" not in profile.signature
+
+
+def test_codeforces_missing_handle_is_not_found():
+    from app.platforms import FetchError, fetch_codeforces
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"status": "FAILED", "comment": "handle not found"}
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    with pytest.raises(FetchError) as exc:
+        fetch_codeforces(FakeClient(), "nobody")
+    assert exc.value.not_found

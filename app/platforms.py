@@ -101,7 +101,23 @@ def fetch_codeforces(client: httpx.Client, handle: str) -> Profile:
     return Profile(
         platform=Platform.CODEFORCES,
         identifier=user["handle"],
-        signature=user.get("organization") or "",
+        # 不能用 organization：CF 的那个字段是个选择器，会要求从已有组织里选
+        # 或者新建一个，填不进任意文本。改成用几个自由文本字段，其中任意一个
+        # 含验证码都算通过。
+        #
+        # 多个字段是因为它们各有各的用途：有人拿 lastName 放真姓氏，有人用
+        # city。全算上就不会强迫成员改掉真实信息。
+        signature="\n".join(
+            filter(
+                None,
+                [
+                    user.get("firstName"),
+                    user.get("lastName"),
+                    user.get("city"),
+                    user.get("organization"),
+                ],
+            )
+        ),
         display_name=user.get("handle"),
         rating=user.get("rating"),
         max_rating=user.get("maxRating"),
