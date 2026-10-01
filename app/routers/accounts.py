@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
+from ..cleanup import delete_account_data
 from ..db import get_session
 from ..deps import get_current_user, require_origin_secret
 from ..models import Account, Platform, User, utcnow
@@ -181,7 +182,15 @@ def remove_account(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> None:
+    """解绑账号。
+
+    连带删掉它的练习记录与快照。只删账号的话，daily_progress 里会留下一堆
+    指向不存在账号的行：榜单查询会因为 join 不到而忽略它们，看上去没事，
+    但表会随解绑次数一直变大，而且重新绑同一账号时旧数据会意外地复活。
+    """
     account = _own_account(db, user, account_id)
+
+    delete_account_data(db, account.id)
     db.delete(account)
     db.commit()
 

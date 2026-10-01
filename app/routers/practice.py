@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from ..db import get_session
@@ -24,6 +24,7 @@ from ..models import (
     Account,
     DailyProgress,
     Platform,
+    RefreshQuota,
     SyncRun,
     User,
     UserStatus,
@@ -35,7 +36,7 @@ from ..schemas import (
     PracticeDay,
     SyncStatus,
 )
-from ..sync import current_practice_day
+from ..sync import current_practice_day, sync_account, sync_rating
 
 router = APIRouter(
     prefix="/practice",
@@ -177,3 +178,107 @@ def sync_status(
         error_count=last.error_count,
         errors=errors,
     )
+
+
+# --------------------------------------------------------------------------- #
+# 手动刷新
+# --------------------------------------------------------------------------- #
+
+
+def _current_week_start() -> str:
+    """本周的周一，YYYY-MM-DD（东八区）。
+
+    按周记账的好处是换周自然重置，不需要额外的清理任务。
+    """
+    today = date.fromisoformat(current_practice_day())
+    return (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
+
+
+@router.get("/quota")
+def refresh_quota(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """本周还剩几次手动刷新机会。"""
+    week = _current_week_start()
+    row = db.exec(
+        select(RefreshQuota).where(
+            RefreshQuota.user_id == current.id,
+            RefreshQuota.week_start == week,
+        )
+    ).first()
+    used = row.used if row else 0
+    return {
+        "week_start": week,
+        "limit": RefreshQuota.WEEKLY_LIMIT,
+        "used": used,
+        "remaining": max(0, RefreshQuota.WEEKLY_LIMIT - used),
+    }
+
+
+@router.post("/refresh")
+def manual_refresh(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """立刻抓一次自己绑定的账号，不等定时任务。
+
+    抓取本身是定时任务在做，成员不需要操心。但有人刚打完一场想立刻看到
+    数字变化，所以给一个口子。每周三次，防止有人反复点把平台惹毛。
+
+    额度在真正开始抓之前扣掉，抓失败也不退：失败往往是平台限流，退了额度
+    只会让人反复重试，反而更容易被限。
+    """
+    week = _current_week_start()
+    quota = db.exec(
+        select(RefreshQuota).where(
+            RefreshQuota.user_id == current.id,
+            RefreshQuota.week_start == week,
+        )
+    ).first()
+
+    if quota is None:
+        quota = RefreshQuota(user_id=current.id, week_start=week, used=0)
+        db.add(quota)
+        db.flush()
+
+    if quota.remaining <= 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"本周的手动刷新次数已用完（{RefreshQuota.WEEKLY_LIMIT} 次），下周一重置",
+        )
+
+    quota.used += 1
+    db.add(quota)
+    db.commit()
+
+    # 只抓自己的账号，且忽略调度周期。
+    accounts = list(
+        db.exec(
+            select(Account).where(
+                Account.user_id == current.id,
+                Account.verified_at.is_not(None),  # type: ignore[union-attr]
+            )
+        ).all()
+    )
+
+    synced = 0
+    added = 0
+    failures: list[str] = []
+    for account in accounts:
+        ok, detail, count = sync_account(db, account, force=True)
+        if ok:
+            synced += 1
+            added += count
+        else:
+            failures.append(f"{Platform.LABELS.get(account.platform, account.platform)}: {detail}")
+        # rating 也顺手刷新，否则「刷新」之后 rating 还是旧的。
+        sync_rating(db, account, force=True)
+    db.commit()
+
+    return {
+        "synced": synced,
+        "added": added,
+        "failures": failures,
+        "remaining": max(0, RefreshQuota.WEEKLY_LIMIT - quota.used),
+    }

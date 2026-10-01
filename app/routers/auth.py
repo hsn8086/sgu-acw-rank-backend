@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from ..config import get_settings
 from ..db import get_session
 from ..deps import get_current_user, get_optional_user, require_origin_secret
-from ..models import Invite, User, UserSession, UserStatus, utcnow
+from ..models import Invite, InviteUse, User, UserSession, UserStatus, utcnow
 from ..schemas import (
     ChangePasswordRequest,
     LoginRequest,
@@ -139,6 +139,10 @@ def register(
         )
         db.add(user)
         db.flush()
+
+        # 记下是谁用的这个码。use_count 只知道用了几次，出事时（比如码被
+        # 转发到群外）光看次数查不出人来。
+        db.add(InviteUse(invite_id=invite.id, user_id=user.id, used_at=utcnow()))
 
         token = _issue_session(db, user, request)
         db.commit()

@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     invite_default_max_uses: int = 1
     invite_default_ttl_hours: int = 24
 
+    # 同步周期（分钟）。过题数变化快，所以分档：刚注册的人还在养成习惯，
+    # 看得勤一些；最近三天内拓到过新题的人属于在用；其余降低频率省请求。
+    #
+    # 之所以按「最后一次拓到新题」而不是「最后一次同步」分档，是为了让
+    # 不做题的人自然落到最低档，而不是反复占用高频额度。
+    sync_interval_fresh_minutes: int = 30
+    sync_interval_active_minutes: int = 60
+    sync_interval_idle_minutes: int = 360
+
+    # rating 只在打完比赛后变，一天一次足够。
+    rating_interval_minutes: int = 24 * 60
+
 
 @lru_cache
 def get_settings() -> Settings:

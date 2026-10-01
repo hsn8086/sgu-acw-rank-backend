@@ -11,6 +11,7 @@ plain strings, which SQLModel cannot resolve back to the related class.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
@@ -18,6 +19,10 @@ from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 def utcnow() -> datetime:
     """Current time as a timezone-aware UTC datetime."""
     return datetime.now(UTC)
+
+
+#: 秒数常量。调度相关的判断都按天算，写个名字比一串 86400 清楚。
+DAY_SECONDS = 86400
 
 
 class Role:
@@ -145,6 +150,48 @@ class Invite(SQLModel, table=True):
         self.expires_at = utcnow() + timedelta(hours=hours)
 
 
+class InviteUse(SQLModel, table=True):
+    """谁用邀请码注册的。
+
+    ``Invite.use_count`` 只知道用了几次，不知道被谁用了。出事时（比如码被
+    转发出去）光看次数查不出人来，所以每次兑换单独记一行。
+    """
+
+    __tablename__ = "invite_uses"
+
+    id: int | None = Field(default=None, primary_key=True)
+    invite_id: int = Field(foreign_key="invites.id", index=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    used_at: datetime = Field(default_factory=utcnow)
+
+
+class RefreshQuota(SQLModel, table=True):
+    """手动刷新练习数据的额度。
+
+    抓取本身是定时任务在做，成员不需要操心。但有人刚打完一场想立刻看到
+    数字变化，所以给一个手动刷新的口子，每周三次，防止有人反复点。
+
+    按周记账：``week_start`` 是那一周的周一（东八区），换周自然重置，
+    不需要额外的清理任务。
+    """
+
+    __tablename__ = "refresh_quotas"
+    __table_args__ = (UniqueConstraint("user_id", "week_start", name="uq_quota_user_week"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    #: 那一周的周一，YYYY-MM-DD（东八区）。
+    week_start: str = Field(max_length=10, index=True)
+    used: int = Field(default=0)
+
+    #: 每周可用的次数。标成 ClassVar，否则 Pydantic 会把它当成表字段。
+    WEEKLY_LIMIT: ClassVar[int] = 3
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.WEEKLY_LIMIT - self.used)
+
+
 class UserSession(SQLModel, table=True):
     """A logged-in browser.
 
@@ -198,6 +245,28 @@ class Account(SQLModel, table=True):
     verify_token: str | None = Field(default=None, max_length=32)
     verify_expires_at: datetime | None = None
 
+    # ------------------------------------------------------------------ #
+    # 缓存的平台数据
+    # ------------------------------------------------------------------ #
+    #
+    # rating 变化很慢（只有打完比赛才变），所以每天查一次就够；过题数则要
+    # 勤一些，否则榜单看起来像是不动的。两类数据分开记时间戳，各自的调度
+    # 周期才能不同。
+
+    rating: int | None = None
+    max_rating: int | None = None
+    #: 平台上的昵称，与 identifier 不一定相同（牛客的 identifier 是数字 uid）。
+    display_name: str | None = Field(default=None, max_length=64)
+    rating_fetched_at: datetime | None = None
+
+    solved_fetched_at: datetime | None = None
+    #: 最近一次**拓到新题**是什么时候。与 solved_fetched_at 不同：后者只是
+    #: 「最后一次去看」，这个才是「最后一次看到变化」。调度靠它，否则一个
+    #: 从不做题的人也会因为反复去看而一直占用高频额度。
+    last_active_at: datetime | None = None
+    #: 最近一次抓取出错的原因。有值时调度器会把它排得更靠前重试。
+    last_error: str | None = Field(default=None, max_length=500)
+
     created_at: datetime = Field(default_factory=utcnow)
 
     user: User | None = Relationship(back_populates="accounts")
@@ -205,6 +274,33 @@ class Account(SQLModel, table=True):
     @property
     def is_verified(self) -> bool:
         return self.verified_at is not None
+
+    def sync_interval_seconds(self, *, now: datetime, active: int, idle: int, fresh: int) -> int:
+        """这个账号现在该隔多久同步一次。
+
+        三个档位，从勤到懒：
+
+        * ``fresh``：注册不久，还看不出习惯，勤看着点。
+        * ``active``：最近三天内拓到过新题，属于在用的人。
+        * ``idle``：一直没动静，降低频率省请求。
+
+        依据是「最后一次拓到新题」而不是「最后一次同步」，所以一个从不
+        做题的人会自然落到最低频，不会因为反复查看而占着高频额度。
+        """
+        if self.last_active_at is not None:
+            idle_for = (now - self.last_active_at).total_seconds()
+            return active if idle_for < 3 * DAY_SECONDS else idle
+
+        # 还没拓到过任何新题：看注册多久了。
+        age = (now - self.created_at).total_seconds()
+        return fresh if age < 7 * DAY_SECONDS else idle
+
+    def is_due(self, *, now: datetime, active: int, idle: int, fresh: int) -> bool:
+        """现在是否到了该同步的时候。"""
+        if self.solved_fetched_at is None:
+            return True
+        interval = self.sync_interval_seconds(now=now, active=active, idle=idle, fresh=fresh)
+        return (now - self.solved_fetched_at).total_seconds() >= interval
 
 
 class SolvedSnapshot(SQLModel, table=True):

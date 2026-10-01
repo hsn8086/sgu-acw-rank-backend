@@ -760,3 +760,121 @@ def test_cannot_delete_root_by_other_admin(client, root_client):
 
     root = next(u for u in _members(root_client) if u["role"] == "root")
     assert admin_client.delete(f"/api/admin/users/{root['id']}").status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# 邀请码使用记录与手动刷新额度
+# --------------------------------------------------------------------------- #
+
+
+def test_invite_use_is_recorded(client, root_client):
+    """谁用了邀请码要记下来。
+
+    use_count 只知道用了几次，出事时（比如码被转发到群外）光看次数查不出人。
+    """
+    from sqlmodel import Session, select
+
+    from app.db import get_engine
+    from app.models import InviteUse
+
+    invite = _make_invite(root_client)
+    created = _register(client, invite["code"]).json()
+
+    with Session(get_engine()) as db:
+        rows = db.exec(select(InviteUse).where(InviteUse.invite_id == invite["id"])).all()
+        assert len(rows) == 1
+        assert rows[0].user_id == created["id"]
+
+
+def test_unbinding_account_removes_its_progress(client, root_client):
+    """解绑账号要连带删掉练习记录。
+
+    留着的话重新绑同一账号时旧数据会意外复活，看起来像「刚绑上就有几百题」。
+    """
+    from unittest.mock import patch
+
+    from sqlmodel import Session, select
+
+    from app.db import get_engine
+    from app.models import DailyProgress
+    from app.platforms import Profile
+
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+
+    with patch(
+        "app.routers.accounts.fetch_profile",
+        return_value=Profile(platform="codeforces", identifier="tester", signature=""),
+    ):
+        account = client.post(
+            "/api/accounts", json={"platform": "codeforces", "identifier": "tester"}
+        ).json()
+
+    # 造一点练习记录。
+    with Session(get_engine()) as db:
+        db.add(
+            DailyProgress(
+                account_id=account["id"],
+                platform="codeforces",
+                date="2026-09-01",
+                solved_count=5,
+            )
+        )
+        db.commit()
+
+    assert client.delete(f"/api/accounts/{account['id']}").status_code == 204
+
+    with Session(get_engine()) as db:
+        left = db.exec(select(DailyProgress).where(DailyProgress.account_id == account["id"])).all()
+        assert left == []
+
+
+def test_manual_refresh_quota(client, root_client):
+    """手动刷新每周三次，用完返回 429。"""
+    from unittest.mock import patch
+
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+
+    with patch(
+        "app.routers.accounts.fetch_profile",
+        return_value=__import__("app.platforms", fromlist=["Profile"]).Profile(
+            platform="codeforces", identifier="tester", signature=""
+        ),
+    ):
+        account = client.post(
+            "/api/accounts", json={"platform": "codeforces", "identifier": "tester"}
+        ).json()
+
+    # 标记已验证。
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.models import Account
+
+    with Session(get_engine()) as db:
+        row = db.get(Account, account["id"])
+        row.verified_at = __import__("app.models", fromlist=["utcnow"]).utcnow()
+        db.add(row)
+        db.commit()
+
+    quota = client.get("/api/practice/quota").json()
+    assert quota["limit"] == 3
+    assert quota["remaining"] == 3
+
+    with (
+        patch("app.routers.practice.sync_account", return_value=(True, "ok", 0)),
+        patch("app.routers.practice.sync_rating", return_value=(True, "ok")),
+    ):
+        for expected in (2, 1, 0):
+            body = client.post("/api/practice/refresh").json()
+            assert body["remaining"] == expected
+
+        blocked = client.post("/api/practice/refresh")
+        assert blocked.status_code == 429
+        assert "用完" in blocked.json()["detail"]
+
+
+def test_manual_refresh_requires_login(client):
+    assert client.post("/api/practice/refresh").status_code == 401
+    assert client.get("/api/practice/quota").status_code == 401

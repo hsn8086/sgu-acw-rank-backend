@@ -396,3 +396,151 @@ def test_nowcoder_dedupes_by_earliest(env):
 
     solved = fetch_solved_nowcoder(FakeClient(), "825377486")
     assert _day_of_epoch(solved.problems["nowcoder:题目甲"]) == "2026-08-19"
+
+
+# --------------------------------------------------------------------------- #
+# 自适应调度
+# --------------------------------------------------------------------------- #
+
+
+def _interval(account, now):
+    from app.config import get_settings
+
+    s = get_settings()
+    return account.sync_interval_seconds(
+        now=now,
+        active=s.sync_interval_active_minutes * 60,
+        idle=s.sync_interval_idle_minutes * 60,
+        fresh=s.sync_interval_fresh_minutes * 60,
+    )
+
+
+def test_new_account_syncs_frequently(env):
+    """刚注册还没做过题，先勤看着点。"""
+    from app.config import get_settings
+
+    now = utcnow()
+    account = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="x",
+        created_at=now - timedelta(hours=1),
+    )
+    assert _interval(account, now) == get_settings().sync_interval_fresh_minutes * 60
+
+
+def test_recently_active_account_stays_on_active_interval(env):
+    from app.config import get_settings
+
+    now = utcnow()
+    account = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="x",
+        created_at=now - timedelta(days=60),
+    )
+    account.last_active_at = now - timedelta(days=1)
+    assert _interval(account, now) == get_settings().sync_interval_active_minutes * 60
+
+
+def test_long_idle_account_slows_down(env):
+    """两周没拓到新题就降到最低频。"""
+    from app.config import get_settings
+
+    now = utcnow()
+    account = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="x",
+        created_at=now - timedelta(days=90),
+    )
+    account.last_active_at = now - timedelta(days=14)
+    assert _interval(account, now) == get_settings().sync_interval_idle_minutes * 60
+
+
+def test_stale_new_account_slows_down(env):
+    """注册久了却一直没做过题，也该降到低频。
+
+    关键点：判断依据是「最后一次拓到新题」而不是「最后一次同步」，
+    否则一个不做题的人会因为反复被查看而一直占着高频额度。
+    """
+    from app.config import get_settings
+
+    now = utcnow()
+    account = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="x",
+        created_at=now - timedelta(days=30),
+    )
+    assert _interval(account, now) == get_settings().sync_interval_idle_minutes * 60
+
+
+def test_is_due_respects_interval(env):
+    from app.config import get_settings
+
+    s = get_settings()
+    now = utcnow()
+    account = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="x",
+        created_at=now - timedelta(days=60),
+    )
+    account.last_active_at = now - timedelta(days=1)
+
+    kwargs = {
+        "active": s.sync_interval_active_minutes * 60,
+        "idle": s.sync_interval_idle_minutes * 60,
+        "fresh": s.sync_interval_fresh_minutes * 60,
+    }
+
+    # 从没抓过：立刻该抓。
+    account.solved_fetched_at = None
+    assert account.is_due(now=now, **kwargs)
+
+    # 刚抓过：还不到时候。
+    account.solved_fetched_at = now - timedelta(minutes=10)
+    assert not account.is_due(now=now, **kwargs)
+
+    # 超过活跃档的间隔：该抓了。
+    account.solved_fetched_at = now - timedelta(minutes=s.sync_interval_active_minutes + 5)
+    assert account.is_due(now=now, **kwargs)
+
+
+def test_timestamped_returns_real_delta_not_total(env):
+    """有时间的平台要返回真正新增数，不是窗口内总数。
+
+    返回总数的话，一个不做题的人每次同步都显得有新题，自适应调度就失效了。
+    """
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+
+        first = _apply_timestamped(
+            db,
+            account,
+            SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(1), "b": _epoch(1)}),
+        )
+        db.commit()
+        assert first == 2
+
+        # 同一份数据再来一次：没有新增。
+        again = _apply_timestamped(
+            db,
+            account,
+            SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(1), "b": _epoch(1)}),
+        )
+        db.commit()
+        assert again == 0
+
+        # 多了一题：新增 1。
+        more = _apply_timestamped(
+            db,
+            account,
+            SolvedSet(
+                Platform.CODEFORCES, "alpha", {"a": _epoch(1), "b": _epoch(1), "c": _epoch(1)}
+            ),
+        )
+        db.commit()
+        assert more == 1

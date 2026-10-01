@@ -14,6 +14,7 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
+from ..cleanup import delete_user_accounts, delete_user_references
 from ..db import get_session
 from ..deps import require_admin
 from ..models import Account, Invite, Role, User, UserSession, UserStatus, utcnow
@@ -316,12 +317,12 @@ def delete_user(
     if user.role == Role.ADMIN and not admin.is_root:
         raise HTTPException(status_code=403, detail="只有 root 可以删除管理员")
 
-    # 会话和账号都跟着走。账号上挂的每日记录由外键级联处理，这里显式删一遍
-    # 以免依赖数据库的级联设置。
+    # 会话、账号、以及指向该成员的其他记录都要一起清掉。漏掉任何一张带
+    # 外键的表，删除都会被数据库拦下。
     for row in db.exec(select(UserSession).where(UserSession.user_id == user.id)).all():
         db.delete(row)
-    for account in db.exec(select(Account).where(Account.user_id == user.id)).all():
-        db.delete(account)
+    delete_user_accounts(db, user.id)
+    delete_user_references(db, user.id)
     db.delete(user)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

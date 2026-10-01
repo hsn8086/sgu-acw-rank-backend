@@ -24,6 +24,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 from sqlmodel import Session, select
 
+from .config import get_settings
 from .db import get_engine, init_db, session_scope
 from .models import (
     Account,
@@ -33,7 +34,7 @@ from .models import (
     SyncRun,
     utcnow,
 )
-from .platforms import FetchError, SolvedSet, fetch_solved
+from .platforms import FetchError, SolvedSet, fetch_profile, fetch_solved
 
 logger = logging.getLogger("sgu_acw.sync")
 
@@ -124,6 +125,10 @@ def _apply_timestamped(
     """有时间戳的平台：按日聚合，覆盖式写入。
 
     只处理 ``since_day`` 之后的日子，避免每次同步都重写整段历史。
+
+    返回的是**真正新增**的题数（与库里已有值相比），不是窗口内的总数。
+    这个数决定账号算不算「活跃」，如果返回总数，一个不做题的人每次同步
+    都会显得有新题，自适应调度就失效了。
     """
     per_day: Counter[str] = Counter()
     for epoch in solved.problems.values():
@@ -134,10 +139,25 @@ def _apply_timestamped(
             continue
         per_day[day] += 1
 
+    # 先读出这些天现有的值，算出差额再覆盖写入。
+    existing: dict[str, int] = {}
+    if per_day:
+        rows = db.exec(
+            select(DailyProgress).where(
+                DailyProgress.account_id == account.id,
+                DailyProgress.date.in_(list(per_day)),  # type: ignore[attr-defined]
+            )
+        ).all()
+        existing = {row.date: row.solved_count for row in rows}
+
+    added = 0
     for day, count in per_day.items():
+        previous = existing.get(day, 0)
+        if count > previous:
+            added += count - previous
         _upsert_progress(db, account, day, count, replace=True)
 
-    return sum(per_day.values())
+    return added
 
 
 def _apply_diff(
@@ -209,26 +229,60 @@ def _apply_diff(
     return len(new_problems)
 
 
-def sync_account(db: Session, account: Account) -> tuple[bool, str, int]:
-    """同步一个账号。返回 ``(是否成功, 说明, 新增题数)``。"""
+def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple[bool, str, int]:
+    """同步一个账号的练习记录。返回 ``(是否成功, 说明, 新增题数)``。
+
+    只动解题数据，不碰 rating——rating 变化慢，由 :func:`sync_rating` 每天
+    查一次就够，两类数据分开调度。
+
+    ``force=True`` 时忽略调度周期（成员手动刷新走这条）。
+    """
+    now = utcnow()
+    settings = get_settings()
+
+    if not force and not account.is_due(
+        now=now,
+        active=settings.sync_interval_active_minutes * 60,
+        idle=settings.sync_interval_idle_minutes * 60,
+        fresh=settings.sync_interval_fresh_minutes * 60,
+    ):
+        return True, "未到同步时间", 0
+
     try:
         solved = fetch_solved(account.platform, account.identifier)
     except FetchError as exc:
+        account.last_error = str(exc)[:500]
+        account.solved_fetched_at = now
+        db.add(account)
         return False, str(exc), 0
 
     if account.platform == Platform.LUOGU:
         # 只有洛谷没有时间戳，走差分。
         added = _apply_diff(db, account, solved)
-        return True, f"累计 {len(solved.problems)} 题，新增 {added}", added
+        detail = f"累计 {len(solved.problems)} 题，新增 {added}"
+    else:
+        # 其余平台（CF / AtCoder / 牛客）都有时间戳。只重算最近一段时间，
+        # 够覆盖排行榜展示的窗口，也不必每次重写全部历史。
+        since = (
+            date.fromisoformat(current_practice_day()) - timedelta(days=RETENTION_DAYS)
+        ).strftime("%Y-%m-%d")
+        added = _apply_timestamped(db, account, solved, since_day=since)
+        detail = f"累计 {len(solved.problems)} 题"
+        _save_snapshot(db, account, solved)
 
-    # 其余平台（CF / AtCoder / 牛客）都有时间戳。只重算最近一段时间，
-    # 够覆盖排行榜展示的窗口，也不必每次重写全部历史。
-    since = (date.fromisoformat(current_practice_day()) - timedelta(days=RETENTION_DAYS)).strftime(
-        "%Y-%m-%d"
-    )
-    total = _apply_timestamped(db, account, solved, since_day=since)
+    account.solved_fetched_at = now
+    account.last_error = None
+    # 只有真的拓到新题才算「活跃」。否则一个不做题的人会因为反复查看而
+    # 一直停留在高频档位。
+    if added > 0:
+        account.last_active_at = now
+    db.add(account)
 
-    # 存一份快照，便于排查抓取是否正常。
+    return True, detail, added
+
+
+def _save_snapshot(db: Session, account: Account, solved) -> None:
+    """存一份已过题目的快照，便于排查抓取是否正常。"""
     snapshot = db.exec(
         select(SolvedSnapshot).where(SolvedSnapshot.account_id == account.id)
     ).first()
@@ -248,7 +302,37 @@ def sync_account(db: Session, account: Account) -> tuple[bool, str, int]:
         snapshot.fetched_at = utcnow()
         db.add(snapshot)
 
-    return True, f"累计 {len(solved.problems)} 题", total
+
+def sync_rating(db: Session, account: Account, *, force: bool = False) -> tuple[bool, str]:
+    """同步账号的 rating。返回 ``(是否成功, 说明)``。
+
+    rating 只在打完比赛后变，变化很慢，所以默认每天查一次。与过题数的
+    调度分开，两者周期不同。
+    """
+    now = utcnow()
+    settings = get_settings()
+
+    if not force and account.rating_fetched_at is not None:
+        elapsed = (now - account.rating_fetched_at).total_seconds()
+        if elapsed < settings.rating_interval_minutes * 60:
+            return True, "未到更新时间"
+
+    try:
+        profile = fetch_profile(account.platform, account.identifier)
+    except FetchError as exc:
+        # rating 抓不到不算严重：过题数才是榜单主体。只记下来。
+        account.last_error = str(exc)[:500]
+        account.rating_fetched_at = now
+        db.add(account)
+        return False, str(exc)
+
+    account.rating = profile.rating
+    account.max_rating = profile.max_rating
+    if profile.display_name:
+        account.display_name = profile.display_name
+    account.rating_fetched_at = now
+    db.add(account)
+    return True, f"rating={profile.rating}"
 
 
 def prune_old_progress(db: Session) -> int:
@@ -262,8 +346,11 @@ def prune_old_progress(db: Session) -> int:
     return len(rows)
 
 
-def run_sync(*, platforms: list[str] | None = None) -> dict:
+def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict:
     """同步所有已验证账号。返回这次同步的摘要。
+
+    ``force=True`` 忽略调度周期，把所有账号都抓一遍（成员手动刷新、管理员
+    排查时用）。
 
     返回普通 dict 而不是 ORM 对象：session 关掉之后 ORM 实例就 detached 了，
     调用方一读属性就报 DetachedInstanceError。
@@ -289,7 +376,7 @@ def run_sync(*, platforms: list[str] | None = None) -> dict:
         account_count = len(accounts)
 
         for account in accounts:
-            success, detail, added = sync_account(db, account)
+            success, detail, added = sync_account(db, account, force=force)
             if success:
                 ok += 1
                 total += added
@@ -299,6 +386,11 @@ def run_sync(*, platforms: list[str] | None = None) -> dict:
                 logger.warning(
                     "sync failed %s/%s: %s", account.platform, account.identifier, detail
                 )
+
+            # rating 与过题数分开调度，各有各的周期。
+            rated_ok, rated_detail = sync_rating(db, account, force=force)
+            if rated_ok:
+                logger.debug("rating %s/%s: %s", account.platform, account.identifier, rated_detail)
 
         db.flush()
 
