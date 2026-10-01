@@ -11,6 +11,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, select
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -27,6 +28,10 @@ from .student_id import ROOT_STUDENT_ID, StudentIdError, is_root_student_id, par
 logger = logging.getLogger("sgu_acw")
 
 API_PREFIX = "/api"
+
+#: 校验失败时不能回显原值的字段。密码尤其不能——Pydantic 会把出错的原值
+#: 放进 ``input``，默认直接返回给客户端。
+SENSITIVE_FIELDS = frozenset({"password", "current_password", "new_password", "token"})
 
 
 def bootstrap_root() -> None:
@@ -111,6 +116,28 @@ def create_app() -> FastAPI:
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(_request, exc: StarletteHTTPException) -> JSONResponse:
         return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(_request, exc: RequestValidationError) -> JSONResponse:
+        """把校验错误里的密码抹掉。
+
+        Pydantic 校验失败时会把出错字段的**原值**放进 ``input``，而 FastAPI
+        默认把它整个返回给客户端。密码超长或类型不对时，密码就这这样原样
+        出现在响应体里：浏览器的 Network 面板、控制台、前端把它当提示显示
+        出来，都是泄面。
+
+        所以对标记为敏感字段的路径，把 ``input`` 换成占位符；其余错误照常
+        返回，因为那些信息对用户有用（比如学号格式不对）。
+        """
+        details = []
+        for error in exc.errors():
+            item = dict(error)
+            # loc 形如 ("body", "password")，最后一段是字段名。
+            field = str(item.get("loc", ("",))[-1]) if item.get("loc") else ""
+            if field in SENSITIVE_FIELDS and "input" in item:
+                item["input"] = "***"
+            details.append(item)
+        return JSONResponse(status_code=422, content={"detail": details})
 
     @app.get(f"{API_PREFIX}/config", dependencies=[Depends(require_origin_secret)])
     def public_config() -> dict:

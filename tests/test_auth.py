@@ -878,3 +878,64 @@ def test_manual_refresh_quota(client, root_client):
 def test_manual_refresh_requires_login(client):
     assert client.post("/api/practice/refresh").status_code == 401
     assert client.get("/api/practice/quota").status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# 校验错误不能回显密码
+# --------------------------------------------------------------------------- #
+
+
+def test_password_is_not_echoed_in_validation_errors(client):
+    """密码校验失败时不能在响应里回显原值。
+
+    Pydantic 会把出错字段的原值放进 ``input``，而 FastAPI 默认整个返回给
+    客户端。密码超长或类型不对时，密码就这样原样出现在响应体里——浏览器的
+    Network 面板、控制台、以及前端的错误提示都会记下它。
+    """
+    marker = "SECRET_MARKER_" + "x" * 200
+    response = client.post(
+        "/api/auth/login",
+        json={"student_id": "24125023001", "password": marker},
+    )
+    assert response.status_code == 422
+    body = response.text
+    assert marker not in body
+    assert "***" in body
+
+
+def test_short_password_is_not_echoed_on_register(client, root_client):
+    invite = _make_invite(root_client)
+    marker = "SHORT"  # 5 位，低于 8 位下限
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "invite_code": invite["code"],
+            "student_id": "24125023001",
+            "display_name": "甲",
+            "password": marker,
+        },
+    )
+    assert response.status_code == 422
+    assert marker not in response.text
+
+
+def test_non_sensitive_fields_are_still_reported(client):
+    """非敏感字段的错误要照常返回，那些信息对用户有用。"""
+    response = client.post(
+        "/api/auth/login",
+        json={"student_id": "", "password": "whatever"},
+    )
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert any("student_id" in str(item.get("loc")) for item in detail)
+
+
+def test_change_password_does_not_echo(client):
+    """改密码接口同样不能回显。"""
+    marker = "SECRET_MARKER_" + "y" * 200
+    response = client.post(
+        "/api/auth/password",
+        json={"current_password": marker, "new_password": "validpassword123"},
+    )
+    # 未登录是 401，但即使走到了校验也该抹掉。这里只断言响应里没有原值。
+    assert marker not in response.text
