@@ -150,3 +150,108 @@ def test_bootstrap_root_uses_placeholder_student_id(tmp_path, monkeypatch):
 
     db_module.reset_engine()
     get_settings.cache_clear()
+
+
+def test_bootstrap_does_not_create_second_root_after_id_change(tmp_path, monkeypatch):
+    """改了 root 的学号之后重启，不该再冒出一个 root。
+
+    原先的幂等性看的是「这个学号存在吗」。一旦有人把 root 的学号从真实学号
+    换成占位号（或者反过来），下次重启就会发现「配置里的学号不存在」，于是
+    又建一个 root。线上真的这么踩过一次。
+
+    现在先判「有没有 root 角色的人」，有就什么都不做。
+    """
+    db_path = tmp_path / "rootid.db"
+    monkeypatch.setenv("SGU_ACW_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("SGU_ACW_ORIGIN_SECRET", "")
+    monkeypatch.setenv("SGU_ACW_BOOTSTRAP_ROOT_STUDENT_ID", "24125023005")
+    monkeypatch.setenv("SGU_ACW_BOOTSTRAP_ROOT_PASSWORD", "rootpass123")
+
+    from app import db as db_module
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    db_module.reset_engine()
+
+    from app.main import create_app
+
+    # 第一次启动：按配置的学号建 root。
+    with TestClient(create_app()) as c:
+        assert c.get("/api/bootstrap").json()["user_count"] == 1
+
+    # 有人把 root 的学号改成占位号（模拟运维操作）。
+    from sqlmodel import Session, select
+
+    from app.db import get_engine
+    from app.models import User
+
+    with Session(get_engine()) as db:
+        root = db.exec(select(User)).one()
+        root.student_id = "00000000000"
+        db.add(root)
+        db.commit()
+
+    # 再启动：配置里还是旧学号，但已经有 root 了，不该再建。
+    with TestClient(create_app()) as c:
+        body = c.get("/api/bootstrap").json()
+        assert body["user_count"] == 1, "不该出现第二个 root"
+
+    db_module.reset_engine()
+    get_settings.cache_clear()
+
+
+def test_bootstrap_falls_back_when_configured_id_is_taken(tmp_path, monkeypatch):
+    """配置里的学号被别人占了时，退回占位号，而不是覆盖那个人。"""
+    db_path = tmp_path / "taken.db"
+    monkeypatch.setenv("SGU_ACW_DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("SGU_ACW_ORIGIN_SECRET", "")
+    monkeypatch.setenv("SGU_ACW_BOOTSTRAP_ROOT_STUDENT_ID", "24125023005")
+    monkeypatch.setenv("SGU_ACW_BOOTSTRAP_ROOT_PASSWORD", "rootpass123")
+
+    from app import db as db_module
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    db_module.reset_engine()
+
+    from sqlmodel import Session, select
+
+    from app.db import get_engine, init_db
+    from app.main import bootstrap_root
+    from app.models import Role, User, utcnow
+    from app.security import hash_password
+    from app.student_id import parse_student_id
+
+    init_db()
+
+    # 先占掉那个学号，做成一个普通成员。
+    with Session(get_engine()) as db:
+        parsed = parse_student_id("24125023005")
+        db.add(
+            User(
+                student_id=parsed.raw,
+                password_hash=hash_password("memberpass123"),
+                display_name="占用者",
+                enroll_year=parsed.enroll_year,
+                level=parsed.level,
+                college_code=parsed.college_code,
+                major_code=parsed.major_code,
+                role=Role.MEMBER,
+                created_at=utcnow(),
+            )
+        )
+        db.commit()
+
+    bootstrap_root()
+
+    with Session(get_engine()) as db:
+        root = db.exec(select(User).where(User.role == Role.ROOT)).one()
+        # root 用了占位号，没有把占用者改成 root。
+        assert root.student_id == "00000000000"
+
+        occupant = db.exec(select(User).where(User.display_name == "占用者")).one()
+        assert occupant.role == Role.MEMBER
+        assert occupant.student_id == "24125023005"
+
+    db_module.reset_engine()
+    get_settings.cache_clear()

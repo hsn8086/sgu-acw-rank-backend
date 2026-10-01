@@ -37,37 +37,51 @@ SENSITIVE_FIELDS = frozenset({"password", "current_password", "new_password", "t
 def bootstrap_root() -> None:
     """Create the seed root account on first run.
 
-    Idempotent: once the student id exists this does nothing, so a restart never
-    resets the password of an account that has been in use.
+    幂等性看的是「已经存在 root 角色的人」，而不是「这个学号存在」。
 
-    root 的学号是十一个 0，不是真实学号——它不占用任何人的号，也不会跟人
-    撞号。因此这里不跑学号解析，年级学院都填占位值。
+    这个区别很重要：如果按学号判断，一旦有人改了 root 的学号（比如从真实
+    学号换成占位号），下次重启就会因为「这个学号不存在」而**再建一个
+    root**。实际就这么踩过。
+
+    root 的学号默认是十一个 0，不是真实学号——它不占用任何人的号，也不会
+    跟人撞号。因此这里不跑学号解析，年级学院都填占位值。
     """
     settings = get_settings()
     if not settings.bootstrap_root_password:
         return
 
-    student_id = (settings.bootstrap_root_student_id or ROOT_STUDENT_ID).strip()
+    with Session(get_engine()) as db:
+        # 已经有 root 就什么都不做。这一条先判，后面才轮得到学号。
+        if db.exec(select(User).where(User.role == Role.ROOT)).first() is not None:
+            return
 
-    # 配了真实学号时仍然解析，方便从旧配置平滑过渡；但推荐用占位号。
-    if is_root_student_id(student_id):
-        parsed = None
-    else:
-        try:
-            parsed = parse_student_id(student_id)
-        except StudentIdError:
-            logger.error(
-                "bootstrap root student id %r is not valid; falling back to %s",
+        student_id = (settings.bootstrap_root_student_id or ROOT_STUDENT_ID).strip()
+
+        # 配了真实学号时仍然解析，方便从旧配置平滑过渡；但推荐用占位号。
+        if is_root_student_id(student_id):
+            parsed = None
+        else:
+            try:
+                parsed = parse_student_id(student_id)
+            except StudentIdError:
+                logger.error(
+                    "bootstrap root student id %r is not valid; falling back to %s",
+                    student_id,
+                    ROOT_STUDENT_ID,
+                )
+                student_id = ROOT_STUDENT_ID
+                parsed = None
+
+        # 学号可能被别的东西占了（比如配置指向一个已注册的成员），
+        # 那就退回占位号，不要覆盖别人。
+        if db.exec(select(User).where(User.student_id == student_id)).first() is not None:
+            logger.warning(
+                "bootstrap root student id %r is taken; using %s instead",
                 student_id,
                 ROOT_STUDENT_ID,
             )
             student_id = ROOT_STUDENT_ID
             parsed = None
-
-    with Session(get_engine()) as db:
-        existing = db.exec(select(User).where(User.student_id == student_id)).first()
-        if existing is not None:
-            return
 
         db.add(
             User(
