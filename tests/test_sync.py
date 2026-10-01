@@ -762,3 +762,75 @@ def test_success_clears_failure_counter(env, monkeypatch):
 
         assert ok
         assert account.consecutive_failures == 0
+
+
+def test_scheduling_is_per_account_not_per_person(env):
+    """调度必须细分到账号，不能按人。
+
+    同一个人可能有活跃的主号和一个早就不用的僵尸小号。如果调度挂在「人」
+    上，这个人的活跃会带着僵尸号一起高频抓取——一个 45 天没动过的号会
+    一天白抓 96 次，一年三万多次无效请求。
+
+    所以 is_due / sync_interval_seconds 挂在 Account 上，不是 User 上。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    base = s.sync_interval_base_minutes * 60
+    cap = s.sync_interval_cap_minutes * 60
+    now = utcnow()
+
+    def make(identifier, active_days_ago):
+        account = Account(
+            user_id=1,
+            platform=Platform.CODEFORCES,
+            identifier=identifier,
+            created_at=now - timedelta(days=90),
+        )
+        if active_days_ago is not None:
+            account.last_active_at = now - timedelta(days=active_days_ago)
+        return account
+
+    # 同一个 user_id，两个号。
+    active = make("main", 0)
+    zombie = make("alt", 45)
+
+    assert active.sync_interval_seconds(now=now, base=base, cap=cap) == base
+    assert zombie.sync_interval_seconds(now=now, base=base, cap=cap) == cap
+
+    # 两个号刚抓过同样的时间：活跃的该抓了，僵尸的还早。
+    for account in (active, zombie):
+        account.solved_fetched_at = now - timedelta(minutes=20)
+
+    assert active.is_due(now=now, base=base, cap=cap)
+    assert not zombie.is_due(now=now, base=base, cap=cap)
+
+
+def test_zombie_account_gets_few_requests(env):
+    """僵尸号的抓取频率要真的低下来。
+
+    按天算一下请求量，确保量级对了——这是「细分到号」的实际收益。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    now = utcnow()
+    zombie = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="alt",
+        created_at=now - timedelta(days=200),
+    )
+    zombie.last_active_at = now - timedelta(days=100)
+
+    interval = zombie.sync_interval_seconds(
+        now=now,
+        base=s.sync_interval_base_minutes * 60,
+        cap=s.sync_interval_cap_minutes * 60,
+    )
+    per_day = 86400 / interval
+
+    # 封顶 7 天 → 一天不到 1 次。
+    assert per_day < 1
+    # 对比：如果跟着活跃的主号走（15 分钟），一天是 96 次。
+    assert per_day < 96 / 10
