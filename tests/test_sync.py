@@ -248,3 +248,98 @@ def test_day_boundary_uses_east_eight(env):
         db.commit()
 
         assert _progress(db, account, _day(0)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 牛客
+# --------------------------------------------------------------------------- #
+
+
+def test_nowcoder_row_parsing():
+    """牛客练习页的表格解析。
+
+    这页是服务端直出的 HTML，字段位置固定：运行ID、题目、判题结果、得分、
+    运行时间、内存、代码长度、语言、提交时间。解析错了会静默少算题数，
+    所以拿一段真实结构的片段钉住。
+    """
+    from app.platforms import _nowcoder_rows, _parse_nowcoder_time
+
+    page = """
+    <table><tbody>
+    <tr><td>84566970</td><td><a href="/acm/problem/318505">恋爱模拟器</a></td>
+        <td>答案正确</td><td>100</td><td>112</td><td>26168</td><td>319</td>
+        <td>PyPy3</td><td>2026-08-19 23:47:35</td></tr>
+    <tr><td>84566959</td><td><a href="/acm/problem/318505">恋爱模拟器</a></td>
+        <td>答案错误</td><td>0</td><td>121</td><td>25532</td><td>262</td>
+        <td>PyPy3</td><td>2026-08-19 23:44:01</td></tr>
+    <tr><th>表头不是数据行</th></tr>
+    </tbody></table>
+    """
+    rows = _nowcoder_rows(page)
+    assert len(rows) == 2
+    assert rows[0] == ("84566970", "恋爱模拟器", "答案正确", "2026-08-19 23:47:35")
+    assert rows[1][2] == "答案错误"
+
+    # 页面上的时间是北京时间，不带时区标记。
+    epoch = _parse_nowcoder_time("2026-08-19 23:47:35")
+    assert epoch is not None
+    assert _day_of_epoch(epoch) == "2026-08-19"
+
+
+def _day_of_epoch(epoch: int) -> str:
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(epoch, UTC).astimezone(CST).strftime("%Y-%m-%d")
+
+
+def test_nowcoder_only_counts_accepted(env, monkeypatch):
+    """只有「答案正确」计入，错误提交不算过题。"""
+    from app.platforms import (
+        _nowcoder_rows,  # noqa: F401
+        fetch_solved_nowcoder,
+    )
+
+    page = """
+    <table><tbody>
+    <tr><td>1</td><td>题目甲</td><td>答案正确</td><td>100</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-19 10:00:00</td></tr>
+    <tr><td>2</td><td>题目乙</td><td>答案错误</td><td>0</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-19 11:00:00</td></tr>
+    </tbody></table>
+    """
+
+    class FakeResponse:
+        status_code = 200
+        text = page
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    solved = fetch_solved_nowcoder(FakeClient(), "825377486")
+    assert set(solved.problems) == {"nowcoder:题目甲"}
+
+
+def test_nowcoder_dedupes_by_earliest(env):
+    """同一题多次通过时只记最早一次。"""
+    from app.platforms import fetch_solved_nowcoder
+
+    page = """
+    <table><tbody>
+    <tr><td>1</td><td>题目甲</td><td>答案正确</td><td>100</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-20 10:00:00</td></tr>
+    <tr><td>2</td><td>题目甲</td><td>答案正确</td><td>100</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-19 10:00:00</td></tr>
+    </tbody></table>
+    """
+
+    class FakeResponse:
+        status_code = 200
+        text = page
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    solved = fetch_solved_nowcoder(FakeClient(), "825377486")
+    assert _day_of_epoch(solved.problems["nowcoder:题目甲"]) == "2026-08-19"

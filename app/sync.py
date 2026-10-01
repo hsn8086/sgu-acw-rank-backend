@@ -2,14 +2,13 @@
 
 两种数据形态，两种策略：
 
-* **CF / AtCoder** 的提交带精确时间戳。每次同步拉全量，按「每题最早一次
-  AC」归到东八区的某一天，直接覆盖当天的计数。重复同步不会重复计数。
+* **CF / AtCoder / 牛客** 的记录带精确时间戳。每次同步拉全量，按「每题
+  最早一次通过」归到东八区的某一天，直接覆盖当天的计数。重复同步不会
+  重复计数。
 * **洛谷** 只给「累计通过哪些题」的集合，没有任何时间信息。于是把上一次
   抓到的集合存下来，这次多出来的题记为增量，归到「上次同步至今」这段
   时间里。第一次同步没有基线，只存快照不产生增量——否则会把一个人几年
   的积累全算到今天。
-
-牛客不提供解题记录，跳过。
 
 这个模块不依赖 FastAPI，可以单独跑：
 
@@ -196,12 +195,12 @@ def sync_account(db: Session, account: Account) -> tuple[bool, str, int]:
         return False, str(exc), 0
 
     if account.platform == Platform.LUOGU:
-        # 洛谷没有时间戳，走差分。
+        # 只有洛谷没有时间戳，走差分。
         added = _apply_diff(db, account, solved)
         return True, f"累计 {len(solved.problems)} 题，新增 {added}", added
 
-    # CF / AtCoder 有时间戳。只重算最近一段时间，够覆盖排行榜展示的窗口，
-    # 也不必每次重写全部历史。
+    # 其余平台（CF / AtCoder / 牛客）都有时间戳。只重算最近一段时间，
+    # 够覆盖排行榜展示的窗口，也不必每次重写全部历史。
     since = (utcnow().astimezone(CST).date() - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%d")
     total = _apply_timestamped(db, account, solved, since_day=since)
 

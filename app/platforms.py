@@ -14,6 +14,15 @@ AtCoder       Affiliation         用户页 HTML           否
 洛谷那个「反爬 cookie」不是登录凭据：它只需要一个随机的 ``__client_id``，
 服务端用它做频次统计。第一次请求会返回 302 并下发 ``C3VK``，带上它重试即可，
 所以这里统一做一次重试。
+
+解题记录的可得性并不一致，且与资料字段无关：
+
+* CF、AtCoder、牛客都带精确时间戳，能直接算出每天过了几题。
+* 洛谷只给「累计通过哪些题」的集合，没有任何时间信息，只能靠快照差分。
+
+牛客容易被误判成拿不到：它的**比赛**记录（rating-history）确实没有逐题
+数据，但**练习**记录（practice-coding）是公开且完整的，服务端直出表格，
+带提交时间和判题结果。别把前者当成全部。
 """
 
 from __future__ import annotations
@@ -22,10 +31,14 @@ import html
 import re
 import secrets
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from .models import Platform
+
+#: 统计口径按东八区。牛客页面上的时间没有时区标记，本身就是北京时间。
+CST = timezone(timedelta(hours=8))
 
 #: 浏览器 UA。几个平台都会拒绝空 UA 或明显的脚本 UA。
 UA = (
@@ -415,15 +428,112 @@ def fetch_solved_luogu(client: httpx.Client, identifier: str) -> SolvedSet:
     return SolvedSet(platform=Platform.LUOGU, identifier=identifier, problems=problems)
 
 
+def fetch_solved_nowcoder(client: httpx.Client, identifier: str) -> SolvedSet:
+    """牛客的练习记录。``identifier`` 是数字 uid。
+
+    页面服务端直出表格，每行一次提交，带精确时间与判题结果，所以属于
+    「有时间戳」那一类，不需要快照差分。一页最多 100 条，翻到没有新行为止。
+
+    注意区分两件事：牛客的**比赛**记录（rating-history）拿不到逐题数据，
+    但**练习**记录（practice-coding）是公开且完整的，别把前者当成全部。
+    """
+    if not identifier.isdigit():
+        raise FetchError("牛客需要填数字 uid")
+
+    problems: dict[str, int] = {}
+    page = 1
+    page_size = 100
+    # 翻页上限，防止接口行为异常时无限循环。100 页 = 一万条提交，够用。
+    max_pages = 100
+
+    while page <= max_pages:
+        response = client.get(
+            f"https://ac.nowcoder.com/acm/contest/profile/{identifier}/practice-coding",
+            params={"page": page, "pageSize": page_size},
+        )
+        if response.status_code != 200:
+            if page == 1:
+                raise FetchError(f"牛客返回 {response.status_code}")
+            break
+
+        rows = _nowcoder_rows(response.text)
+        if not rows:
+            if page == 1:
+                # 页面能开但没有任何记录：uid 可能不存在，也可能只是没提交过。
+                # 无法区分，按「没有数据」处理而不报错。
+                break
+            break
+
+        for _run_id, title, verdict, submitted_at in rows:
+            if verdict != "答案正确":
+                continue
+            # 题目用标题当键：页面上的链接只有题目 id，但同一题在不同比赛
+            # 里 id 不同，标题反而更稳定。
+            key = f"nowcoder:{title}"
+            epoch = _parse_nowcoder_time(submitted_at)
+            if epoch is None:
+                continue
+            if key not in problems or epoch < problems[key]:
+                problems[key] = epoch
+
+        # 本页不足一页，说明到底了。
+        if len(rows) < page_size:
+            break
+        page += 1
+
+    return SolvedSet(platform=Platform.NOWCODER, identifier=identifier, problems=problems)
+
+
+#: 牛客表格列：运行ID、题目、运行结果、得分、运行时间、使用内存、代码长度、语言、提交时间。
+_NOWCODER_ROW_RE = re.compile(r"<tr[^>]*>(.*?)</tr>", re.S)
+_NOWCODER_CELL_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
+_NOWCODER_TIME_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})")
+
+
+def _nowcoder_rows(page: str) -> list[tuple[str, str, str, str]]:
+    """从练习页的表格里取出 (运行ID, 题目, 判题结果, 提交时间)。"""
+    rows: list[tuple[str, str, str, str]] = []
+    for raw in _NOWCODER_ROW_RE.findall(page):
+        cells = [
+            re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", cell))).strip()
+            for cell in _NOWCODER_CELL_RE.findall(raw)
+        ]
+        # 只认数据行：至少要有运行ID、题目、结果和提交时间。
+        if len(cells) < 9:
+            continue
+        run_id, title, verdict = cells[0], cells[1], cells[2]
+        submitted_at = cells[8]
+        if not run_id.isdigit() or not _NOWCODER_TIME_RE.match(submitted_at):
+            continue
+        rows.append((run_id, title, verdict, submitted_at))
+    return rows
+
+
+def _parse_nowcoder_time(value: str) -> int | None:
+    """把页面上的时间转成 epoch 秒。
+
+    页面给的是北京时间（无时区标记），所以按东八区解析，不能当 UTC。
+    """
+    match = _NOWCODER_TIME_RE.match(value)
+    if not match:
+        return None
+    year, month, day, hour, minute, second = (int(part) for part in match.groups())
+    try:
+        return int(datetime(year, month, day, hour, minute, second, tzinfo=CST).timestamp())
+    except ValueError:
+        return None
+
+
 _SOLVED_FETCHERS = {
     Platform.CODEFORCES: fetch_solved_codeforces,
     Platform.ATCODER: fetch_solved_atcoder,
     Platform.LUOGU: fetch_solved_luogu,
+    Platform.NOWCODER: fetch_solved_nowcoder,
 }
 
 
 def fetch_solved(platform: str, identifier: str) -> SolvedSet:
-    """读一个账号做过的题目。牛客没有这个能力，会抛 FetchError。"""
+    """读一个账号做过的题目。"""
     fetcher = _SOLVED_FETCHERS.get(platform)
     if fetcher is None:
         label = Platform.LABELS.get(platform, platform)
