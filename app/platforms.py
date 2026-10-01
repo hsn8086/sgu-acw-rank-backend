@@ -260,6 +260,9 @@ def fetch_nowcoder(client: httpx.Client, identifier: str) -> Profile:
         # 页面能打开但没有这个区块，说明 uid 不存在。
         raise FetchError("牛客上没有这个用户", not_found=True)
 
+    # 昵称不在可见文本里，而是藏在「私信」链接的 data-receiver-name 上。
+    nickname = re.search(r'data-receiver-name="([^"]+)"', page)
+
     rating = None
     rating_match = re.search(r"(\d+)\s*Rating", _clean(page))
     if rating_match:
@@ -269,7 +272,7 @@ def fetch_nowcoder(client: httpx.Client, identifier: str) -> Profile:
         platform=Platform.NOWCODER,
         identifier=identifier,
         signature=_clean(brief.group(1)),
-        display_name=identifier,
+        display_name=nickname.group(1) if nickname else identifier,
         rating=rating,
         internal_id=identifier,
     )
