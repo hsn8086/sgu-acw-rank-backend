@@ -1,0 +1,29 @@
+[Unit]
+Description=SGU ACW 练习数据同步（一次）
+Documentation=https://github.com/hsn8086/sgu-acw-rank-backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sgu-acw-api
+# 不带 --force：由 is_due() 决定哪些账号该抓。绝大多数唤醒是空跑，
+# 一次只要十几毫秒。
+ExecStart=/opt/sgu-acw-api/.venv/bin/python -m app.sync
+EnvironmentFile=/etc/sgu-acw-api.env
+
+# 单次运行的硬上限。正常一轮抓取几秒到几十秒；超过这个数说明某个平台
+# 卡住了，直接掐掉，下一轮再来。宁可漏一轮，也不要挂在那里占着连接。
+TimeoutStartSec=600
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sgu-acw
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true

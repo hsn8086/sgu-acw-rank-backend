@@ -267,6 +267,11 @@ class Account(SQLModel, table=True):
     #: 最近一次抓取出错的原因。有值时调度器会把它排得更靠前重试。
     last_error: str | None = Field(default=None, max_length=500)
 
+    #: 连续失败次数。用于退避：一个持续失败的账号（平台改版、账号注销）
+    #: 不该每五分钟撞一次墙。任何一次成功都会清零。
+    consecutive_failures: int = Field(default=0)
+    rating_failures: int = Field(default=0)
+
     created_at: datetime = Field(default_factory=utcnow)
 
     user: User | None = Relationship(back_populates="accounts")
@@ -275,31 +280,48 @@ class Account(SQLModel, table=True):
     def is_verified(self) -> bool:
         return self.verified_at is not None
 
-    def sync_interval_seconds(self, *, now: datetime, active: int, idle: int, fresh: int) -> int:
+    def sync_interval_seconds(self, *, now: datetime, base: int, cap: int) -> int:
         """这个账号现在该隔多久同步一次。
 
-        三个档位，从勤到懒：
+        间隔随「不活跃天数」翻倍，封顶 ``cap``：
 
-        * ``fresh``：注册不久，还看不出习惯，勤看着点。
-        * ``active``：最近三天内拓到过新题，属于在用的人。
-        * ``idle``：一直没动静，降低频率省请求。
+            间隔 = min(cap, base × 2^不活跃天数)
 
-        依据是「最后一次拓到新题」而不是「最后一次同步」，所以一个从不
-        做题的人会自然落到最低频，不会因为反复查看而占着高频额度。
+        不活跃天数从 ``last_active_at``（最后一次**拓到新题**）算起；从没
+        拓到过新题时改从 ``created_at`` 算，于是新账号天然落在曲线起点，
+        不需要单独一个「新人档」。
+
+        用曲线而不是固定档位的原因：档位之间的跳变很硬（一小时直接跳到
+        六小时），而活跃度是连续变化的。翻倍的形状也直观——每多一天不活跃，
+        间隔就翻一倍，不用记表格。
+
+        七天封顶是个折中：再慢就没人看得到变化了。真到了谷值还想立刻更新，
+        成员可以手动刷新（每周三次）。
         """
-        if self.last_active_at is not None:
-            idle_for = (now - self.last_active_at).total_seconds()
-            return active if idle_for < 3 * DAY_SECONDS else idle
+        reference = self.last_active_at or self.created_at
+        idle_days = max(0.0, (now - reference).total_seconds() / DAY_SECONDS)
 
-        # 还没拓到过任何新题：看注册多久了。
-        age = (now - self.created_at).total_seconds()
-        return fresh if age < 7 * DAY_SECONDS else idle
+        # 2 ** 很大的数会溢出，先封顶再算。
+        if idle_days >= 32:
+            return cap
+        return min(cap, int(base * (2**idle_days)))
 
-    def is_due(self, *, now: datetime, active: int, idle: int, fresh: int) -> bool:
-        """现在是否到了该同步的时候。"""
+    def is_due(self, *, now: datetime, base: int, cap: int) -> bool:
+        """现在是否到了该同步的时候。
+
+        连续失败的账号会被推后：失败一次等两倍，两次等四倍，直到封顶。
+        否则一个已经注销的平台账号会每五分钟撞一次墙，白耗请求，而且日志
+        里全是同一行错误。
+        """
         if self.solved_fetched_at is None:
             return True
-        interval = self.sync_interval_seconds(now=now, active=active, idle=idle, fresh=fresh)
+
+        interval = self.sync_interval_seconds(now=now, base=base, cap=cap)
+        if self.consecutive_failures:
+            # 2^n 增长，封顶用 cap，避免溢出。
+            shift = min(self.consecutive_failures, 32)
+            interval = min(cap, interval * (2**shift))
+
         return (now - self.solved_fetched_at).total_seconds() >= interval
 
 

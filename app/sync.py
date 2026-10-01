@@ -242,15 +242,17 @@ def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple
 
     if not force and not account.is_due(
         now=now,
-        active=settings.sync_interval_active_minutes * 60,
-        idle=settings.sync_interval_idle_minutes * 60,
-        fresh=settings.sync_interval_fresh_minutes * 60,
+        base=settings.sync_interval_base_minutes * 60,
+        cap=settings.sync_interval_cap_minutes * 60,
     ):
         return True, "未到同步时间", 0
 
     try:
         solved = fetch_solved(account.platform, account.identifier)
     except FetchError as exc:
+        # 失败也要记时间，否则下次唤醒会立刻重试，一个持续失败的账号会
+        # 每五分钟撞一次墙。但重试间隔要退避：失败次数越多等得越久。
+        account.consecutive_failures += 1
         account.last_error = str(exc)[:500]
         account.solved_fetched_at = now
         db.add(account)
@@ -272,6 +274,7 @@ def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple
 
     account.solved_fetched_at = now
     account.last_error = None
+    account.consecutive_failures = 0
     # 只有真的拓到新题才算「活跃」。否则一个不做题的人会因为反复查看而
     # 一直停留在高频档位。
     if added > 0:
@@ -321,6 +324,7 @@ def sync_rating(db: Session, account: Account, *, force: bool = False) -> tuple[
         profile = fetch_profile(account.platform, account.identifier)
     except FetchError as exc:
         # rating 抓不到不算严重：过题数才是榜单主体。只记下来。
+        account.rating_failures += 1
         account.last_error = str(exc)[:500]
         account.rating_fetched_at = now
         db.add(account)
@@ -331,6 +335,7 @@ def sync_rating(db: Session, account: Account, *, force: bool = False) -> tuple[
     if profile.display_name:
         account.display_name = profile.display_name
     account.rating_fetched_at = now
+    account.rating_failures = 0
     db.add(account)
     return True, f"rating={profile.rating}"
 
@@ -357,26 +362,39 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
     """
     init_db()
 
-    with session_scope() as db:
-        run = SyncRun(started_at=utcnow())
-        db.add(run)
-        db.flush()
-        run_id = run.id
-
-    errors: list[str] = []
-    ok = 0
-    total = 0
-    account_count = 0
-
+    # 先把该抓哪些账号定下来，单独一个短事务。
     with session_scope() as db:
         statement = select(Account).where(Account.verified_at.is_not(None))  # type: ignore[union-attr]
         if platforms:
             statement = statement.where(Account.platform.in_(platforms))  # type: ignore[attr-defined]
-        accounts = list(db.exec(statement).all())
-        account_count = len(accounts)
+        account_ids = [a.id for a in db.exec(statement).all()]
 
-        for account in accounts:
+    errors: list[str] = []
+    ok = 0
+    total = 0
+    fetched = 0
+
+    for account_id in account_ids:
+        # 每个账号一个独立事务。抓取是网络操作，一个账号要 0.3～5 秒；如果
+        # 把整个循环包在一个事务里，写锁会被持有几分钟，期间任何登录、绑定、
+        # 手动刷新都会被卡住（实测能卡 3.5 秒以上）。拆开之后锁只在自己那
+        # 一小段写入期间持有，毫秒级。
+        #
+        # 代价是同步不再是原子的，但这本来就不需要：一个账号失败不该回滚
+        # 别人的结果。
+        with session_scope() as db:
+            account = db.get(Account, account_id)
+            if account is None:
+                continue
+
             success, detail, added = sync_account(db, account, force=force)
+            if detail == "未到同步时间":
+                # 没到点就不算「抓过」，也不记日志。这是绝大多数情况：
+                # 每五分钟唤醒一次，而大多数账号的间隔比这长得多。
+                sync_rating(db, account, force=force)
+                continue
+
+            fetched += 1
             if success:
                 ok += 1
                 total += added
@@ -388,34 +406,33 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
                 )
 
             # rating 与过题数分开调度，各有各的周期。
-            rated_ok, rated_detail = sync_rating(db, account, force=force)
-            if rated_ok:
-                logger.debug("rating %s/%s: %s", account.platform, account.identifier, rated_detail)
+            sync_rating(db, account, force=force)
 
-        db.flush()
-
-        run = db.get(SyncRun, run_id)
-        if run is not None:
+    # 只有真的抓了账号才记一行。每五分钟唤醒一次的话，每次都记会攒出十万
+    # 行／年的噪音，而绝大多数唤醒是空跑。
+    if fetched:
+        with session_scope() as db:
+            run = SyncRun(started_at=utcnow())
             run.finished_at = utcnow()
-            run.account_count = account_count
+            run.account_count = fetched
             run.ok_count = ok
             run.error_count = len(errors)
             run.errors_json = json.dumps(errors, ensure_ascii=False)
             db.add(run)
 
-        pruned = prune_old_progress(db)
-        if pruned:
-            logger.info("pruned %d old progress rows", pruned)
+            pruned = prune_old_progress(db)
+            if pruned:
+                logger.info("pruned %d old progress rows", pruned)
 
     logger.info(
-        "sync done: %d accounts, %d ok, %d errors, %d new problems",
-        account_count,
+        "sync done: %d fetched, %d ok, %d errors, %d new problems",
+        fetched,
         ok,
         len(errors),
         total,
     )
     return {
-        "account_count": account_count,
+        "account_count": fetched,
         "ok_count": ok,
         "error_count": len(errors),
         "new_problems": total,

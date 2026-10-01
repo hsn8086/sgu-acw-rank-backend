@@ -1,0 +1,18 @@
+[Unit]
+Description=SGU ACW 练习数据同步（定时唤醒）
+Documentation=https://github.com/hsn8086/sgu-acw-rank-backend
+
+[Timer]
+# 每 5 分钟唤醒一次，由 is_due() 决定哪些账号真该抓。
+#
+# 唤醒频率高于抓取频率是有意的：账号的间隔从 15 分钟到 7 天不等，用固定
+# 的抓取周期没法覆盖。唤醒本身很便宜（一次数据库查询，十几毫秒），真正
+# 花钱的是抓取，而那由每个账号自己的间隔决定。
+OnCalendar=*:0/5
+# 服务停了错过的话，开机补跑一次。
+Persistent=true
+# 上一轮还没跑完就跳过这一轮，不要堆叠。
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

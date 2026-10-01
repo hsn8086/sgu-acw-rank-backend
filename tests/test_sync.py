@@ -409,71 +409,119 @@ def _interval(account, now):
     s = get_settings()
     return account.sync_interval_seconds(
         now=now,
-        active=s.sync_interval_active_minutes * 60,
-        idle=s.sync_interval_idle_minutes * 60,
-        fresh=s.sync_interval_fresh_minutes * 60,
+        base=s.sync_interval_base_minutes * 60,
+        cap=s.sync_interval_cap_minutes * 60,
     )
 
 
-def test_new_account_syncs_frequently(env):
-    """刚注册还没做过题，先勤看着点。"""
+def _kwargs():
     from app.config import get_settings
 
-    now = utcnow()
-    account = Account(
-        user_id=1,
-        platform=Platform.CODEFORCES,
-        identifier="x",
-        created_at=now - timedelta(hours=1),
-    )
-    assert _interval(account, now) == get_settings().sync_interval_fresh_minutes * 60
+    s = get_settings()
+    return {
+        "base": s.sync_interval_base_minutes * 60,
+        "cap": s.sync_interval_cap_minutes * 60,
+    }
 
 
-def test_recently_active_account_stays_on_active_interval(env):
-    from app.config import get_settings
+def test_new_account_starts_at_curve_base(env):
+    """刚注册的账号落在曲线起点。
 
-    now = utcnow()
-    account = Account(
-        user_id=1,
-        platform=Platform.CODEFORCES,
-        identifier="x",
-        created_at=now - timedelta(days=60),
-    )
-    account.last_active_at = now - timedelta(days=1)
-    assert _interval(account, now) == get_settings().sync_interval_active_minutes * 60
-
-
-def test_long_idle_account_slows_down(env):
-    """两周没拓到新题就降到最低频。"""
-    from app.config import get_settings
-
-    now = utcnow()
-    account = Account(
-        user_id=1,
-        platform=Platform.CODEFORCES,
-        identifier="x",
-        created_at=now - timedelta(days=90),
-    )
-    account.last_active_at = now - timedelta(days=14)
-    assert _interval(account, now) == get_settings().sync_interval_idle_minutes * 60
-
-
-def test_stale_new_account_slows_down(env):
-    """注册久了却一直没做过题，也该降到低频。
-
-    关键点：判断依据是「最后一次拓到新题」而不是「最后一次同步」，
-    否则一个不做题的人会因为反复被查看而一直占着高频额度。
+    没有单独一个「新人档」：从没拓到过新题时，不活跃天数从注册时间算，
+    自然就是 0 天，取到最小间隔。
     """
     from app.config import get_settings
 
     now = utcnow()
+    # 刚注册几分钟：不活跃天数接近 0，2^0 = 1，取到起点。
     account = Account(
         user_id=1,
         platform=Platform.CODEFORCES,
         identifier="x",
+        created_at=now - timedelta(minutes=1),
+    )
+    assert _interval(account, now) == get_settings().sync_interval_base_minutes * 60
+
+
+def test_interval_doubles_each_idle_day(env):
+    """每多一天不活跃，间隔翻一倍。
+
+    这是曲线的核心性质，比固定档位的跳变更贴近实际：活跃度是连续变化的，
+    不该在某个时刻从一小时直接跳到六小时。
+    """
+    from app.config import get_settings
+
+    base = get_settings().sync_interval_base_minutes * 60
+    now = utcnow()
+
+    for days, factor in [(0, 1), (1, 2), (2, 4), (3, 8), (4, 16)]:
+        account = Account(
+            user_id=1,
+            platform=Platform.CODEFORCES,
+            identifier="x",
+            created_at=now - timedelta(days=60),
+        )
+        account.last_active_at = now - timedelta(days=days)
+        assert _interval(account, now) == base * factor, f"{days} 天"
+
+
+def test_interval_is_capped(env):
+    """间隔封顶，不会无限增长。
+
+    封顶之外再慢就没意义了——没人会等八天看自己的数字。真到了谷值还想
+    立刻更新，成员可以手动刷新。
+    """
+    from app.config import get_settings
+
+    cap = get_settings().sync_interval_cap_minutes * 60
+    now = utcnow()
+
+    for days in [10, 14, 30, 365, 3650]:
+        account = Account(
+            user_id=1,
+            platform=Platform.CODEFORCES,
+            identifier="x",
+            created_at=now - timedelta(days=60),
+        )
+        account.last_active_at = now - timedelta(days=days)
+        assert _interval(account, now) == cap, f"{days} 天"
+
+
+def test_never_active_account_slows_down_with_age(env):
+    """注册久了却一直没做过题，也会沿曲线放慢。
+
+    关键点：不活跃天数从注册时间算起，而不是从「上次同步」算。否则一个
+    不做题的人会因为反复被查看而一直停在最小间隔。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    now = utcnow()
+
+    brand_new = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="a",
+        created_at=now - timedelta(minutes=1),
+    )
+    # 注册一天：2^1 = 2，间隔翻一倍。
+    one_day = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="b",
+        created_at=now - timedelta(days=1),
+    )
+    old = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="c",
         created_at=now - timedelta(days=30),
     )
-    assert _interval(account, now) == get_settings().sync_interval_idle_minutes * 60
+
+    assert _interval(brand_new, now) == s.sync_interval_base_minutes * 60
+    assert _interval(one_day, now) == s.sync_interval_base_minutes * 2 * 60
+    # 30 天远超封顶所需，直接到顶。
+    assert _interval(old, now) == s.sync_interval_cap_minutes * 60
 
 
 def test_is_due_respects_interval(env):
@@ -487,25 +535,21 @@ def test_is_due_respects_interval(env):
         identifier="x",
         created_at=now - timedelta(days=60),
     )
+    # 昨天做过题 → 间隔是起点的一倍。
     account.last_active_at = now - timedelta(days=1)
-
-    kwargs = {
-        "active": s.sync_interval_active_minutes * 60,
-        "idle": s.sync_interval_idle_minutes * 60,
-        "fresh": s.sync_interval_fresh_minutes * 60,
-    }
+    interval_min = s.sync_interval_base_minutes * 2
 
     # 从没抓过：立刻该抓。
     account.solved_fetched_at = None
-    assert account.is_due(now=now, **kwargs)
+    assert account.is_due(now=now, **_kwargs())
 
     # 刚抓过：还不到时候。
-    account.solved_fetched_at = now - timedelta(minutes=10)
-    assert not account.is_due(now=now, **kwargs)
+    account.solved_fetched_at = now - timedelta(minutes=1)
+    assert not account.is_due(now=now, **_kwargs())
 
-    # 超过活跃档的间隔：该抓了。
-    account.solved_fetched_at = now - timedelta(minutes=s.sync_interval_active_minutes + 5)
-    assert account.is_due(now=now, **kwargs)
+    # 超过当前间隔：该抓了。
+    account.solved_fetched_at = now - timedelta(minutes=interval_min + 1)
+    assert account.is_due(now=now, **_kwargs())
 
 
 def test_timestamped_returns_real_delta_not_total(env):
@@ -630,3 +674,91 @@ def test_rating_board_sorted_desc(env):
         board = rating_board(_current=low, db=db, platform=Platform.CODEFORCES)
         assert [e.identifier for e in board.entries] == ["high", "low"]
         assert board.entries[0].rank == 1
+
+
+def test_failures_back_off(env):
+    """连续失败要退避。
+
+    否则一个已经注销的平台账号会每五分钟撞一次墙，白耗请求，日志里还全是
+    同一行错误。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    base = s.sync_interval_base_minutes * 60
+    cap = s.sync_interval_cap_minutes * 60
+    now = utcnow()
+
+    def due_after(failures, minutes_ago):
+        account = Account(
+            user_id=1,
+            platform=Platform.CODEFORCES,
+            identifier="x",
+            created_at=now - timedelta(days=1),
+        )
+        account.last_active_at = now
+        account.consecutive_failures = failures
+        account.solved_fetched_at = now - timedelta(minutes=minutes_ago)
+        return account.is_due(now=now, base=base, cap=cap)
+
+    # 正常账号（无失败）15 分钟就该抓了。
+    assert due_after(0, 16)
+    assert not due_after(0, 10)
+
+    # 失败一次：间隔翻倍到 30 分钟，16 分钟时还不该抓。
+    assert not due_after(1, 16)
+    assert due_after(1, 31)
+
+    # 失败两次：1 小时。
+    assert not due_after(2, 50)
+    assert due_after(2, 61)
+
+
+def test_failure_backoff_is_capped(env):
+    """退避有上限，不会无限增长。"""
+    from app.config import get_settings
+
+    s = get_settings()
+    now = utcnow()
+    account = Account(
+        user_id=1,
+        platform=Platform.CODEFORCES,
+        identifier="x",
+        created_at=now - timedelta(days=1),
+    )
+    account.last_active_at = now
+    account.consecutive_failures = 50
+    account.solved_fetched_at = now - timedelta(days=6)
+
+    # 6 天还没到封顶的 7 天。
+    assert not account.is_due(
+        now=now,
+        base=s.sync_interval_base_minutes * 60,
+        cap=s.sync_interval_cap_minutes * 60,
+    )
+    account.solved_fetched_at = now - timedelta(days=8)
+    assert account.is_due(
+        now=now,
+        base=s.sync_interval_base_minutes * 60,
+        cap=s.sync_interval_cap_minutes * 60,
+    )
+
+
+def test_success_clears_failure_counter(env, monkeypatch):
+    """一次成功就把失败计数清零。"""
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+        account.consecutive_failures = 5
+        db.add(account)
+        db.commit()
+
+        monkeypatch.setattr(
+            "app.sync.fetch_solved",
+            lambda platform, identifier: SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(1)}),
+        )
+        ok, _, _ = sync_account(db, account, force=True)
+        db.commit()
+
+        assert ok
+        assert account.consecutive_failures == 0
