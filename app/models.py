@@ -15,6 +15,8 @@ from typing import ClassVar
 
 from sqlmodel import Field, Relationship, SQLModel, UniqueConstraint
 
+from . import academic
+
 
 def utcnow() -> datetime:
     """Current time as a timezone-aware UTC datetime."""
@@ -75,6 +77,16 @@ class User(SQLModel, table=True):
     college_code: str = Field(max_length=4)
     major_code: str = Field(max_length=4)
 
+    #: 学院名与专业名的**人工覆盖值**。为空时按学号里的码查表。
+    #:
+    #: 需要可覆盖是因为联培码（94-97）是共用的，同一个码下挂着不同学院的
+    #: 专业，光看码推不出准确的学院名。
+    #:
+    #: 列名带 override 后缀是有意的：接口里的 college_name 是解析结果
+    #: （见下面的属性），两者不是一回事，名字上分开免得混。
+    college_override: str | None = Field(default=None, max_length=64)
+    major_override: str | None = Field(default=None, max_length=64)
+
     role: str = Field(default=Role.MEMBER, max_length=16, index=True)
     status: str = Field(default=UserStatus.ACTIVE, max_length=16, index=True)
 
@@ -96,6 +108,16 @@ class User(SQLModel, table=True):
     @property
     def is_root(self) -> bool:
         return self.role == Role.ROOT
+
+    @property
+    def college_name(self) -> str | None:
+        """学院名。人工改过就用改的，否则按学号里的码查表。"""
+        return self.college_override or academic.college_name(self.college_code)
+
+    @property
+    def major_name(self) -> str | None:
+        """专业名。同上。"""
+        return self.major_override or academic.major_name(self.college_code, self.major_code)
 
     @property
     def is_active(self) -> bool:

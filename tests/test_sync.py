@@ -919,3 +919,80 @@ def test_codeforces_missing_handle_is_not_found():
     with pytest.raises(FetchError) as exc:
         fetch_codeforces(FakeClient(), "nobody")
     assert exc.value.not_found
+
+
+# --------------------------------------------------------------------------- #
+# 榜单的可复用入口
+# --------------------------------------------------------------------------- #
+
+
+def test_build_practice_rank_callable_directly(env):
+    """排序逻辑必须能直接调用，不能只有 FastAPI 能调。
+
+    dashboard 接口复用了这套逻辑。如果把它写成带 ``Query(default=...)`` 的
+    路由函数，直接调用时那几个参数拿到的是 ``Query`` 对象而不是默认值，
+    后面一句 ``q.strip()`` 就会炸成 500。线上这么踩过。
+
+    所以排序逻辑在 build_practice_rank（普通函数）里，路由只是薄薄一层。
+    """
+    from app.routers.practice import build_practice_rank
+
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+        _apply_timestamped(
+            db,
+            account,
+            SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(1), "b": _epoch(2)}),
+        )
+        db.commit()
+
+        # 不传任何筛选参数，也不经过 FastAPI。
+        result = build_practice_rank(db, days=30)
+        assert len(result.entries) == 1
+        assert result.entries[0].display_name == "甲"
+        assert result.entries[0].total == 2
+
+
+def test_build_practice_rank_filters(env):
+    """筛选在普通函数里也要生效。"""
+    from app.routers.practice import build_practice_rank
+
+    with Session(get_engine()) as db:
+        a = _make_user(db, "24125023001", "甲")
+        b = _make_user(db, "25125023002", "乙")
+        for user in (a, b):
+            account = _make_account(db, user, f"acc{user.id}")
+            _apply_timestamped(
+                db,
+                account,
+                SolvedSet(Platform.CODEFORCES, f"acc{user.id}", {"p": _epoch(1)}),
+            )
+        db.commit()
+
+        # 按姓名搜。
+        assert len(build_practice_rank(db, days=30, q="甲").entries) == 1
+        # 按学号搜。
+        assert len(build_practice_rank(db, days=30, q="2512").entries) == 1
+        # 按年级筛。_make_user 固定造 2024 级，所以两人都命中。
+        assert len(build_practice_rank(db, days=30, enroll_year=2024).entries) == 2
+        assert len(build_practice_rank(db, days=30, enroll_year=2025).entries) == 0
+        # 按学院筛（两人都是 25 学院）。
+        assert len(build_practice_rank(db, days=30, college="信息工程学院").entries) == 2
+        assert len(build_practice_rank(db, days=30, college="商学院").entries) == 0
+
+
+def test_rank_entry_carries_college_names(env):
+    """榜单每行要带上学院名与专业名。"""
+    from app.routers.practice import build_practice_rank
+
+    with Session(get_engine()) as db:
+        user = _make_user(db, "24125023001", "甲")
+        account = _make_account(db, user, "alpha")
+        _apply_timestamped(db, account, SolvedSet(Platform.CODEFORCES, "alpha", {"a": _epoch(1)}))
+        db.commit()
+
+        entry = build_practice_rank(db, days=30).entries[0]
+        assert entry.college_code == "25"
+        assert entry.college_name == "信息工程学院"
+        assert entry.major_name == "软件工程"

@@ -36,6 +36,7 @@ from ..schemas import (
     DashboardAccount,
     DashboardSummary,
     PracticeDay,
+    PracticeFilterOptions,
     RatingEntry,
     RatingResponse,
     SyncStatus,
@@ -61,20 +62,43 @@ def _recent_dates(days: int) -> list[str]:
     ]
 
 
-@router.get("/rank", response_model=DailyPracticeResponse)
-def practice_rank(
-    _current: User = Depends(get_current_user),
-    db: Session = Depends(get_session),
-    days: int = Query(default=7, ge=1, le=90, description="统计最近多少天"),
-    platform: str | None = Query(default=None, description="只统计某个平台"),
-    include_retired: bool = Query(default=False),
+def build_practice_rank(
+    db: Session,
+    *,
+    days: int = 7,
+    platform: str | None = None,
+    include_retired: bool = False,
+    college: str | None = None,
+    enroll_year: int | None = None,
+    q: str | None = None,
 ) -> DailyPracticeResponse:
     """按最近 N 天的过题总数排行。
 
-    需要登录：榜单把姓名和练习量绑在一起，这正是站点要封起来的原因。
+    这是个普通函数，不是路由。**必须有这样一层**：路由里的 ``Query(default=...)``
+    只有 FastAPI 会解析，直接调用那个函数时拿到的是 ``Query`` 对象本身，后面
+    一句 ``q.strip()`` 就会炸成 500。dashboard 直接复用了排序逻辑，就这么踩过。
+
+    筛选在汇总之后做，不是查库时做。因为筛的是「学院」「年级」这类用户的
+    属性，而 ``daily_progress`` 只记账号和日期，按人合并之后才能筛。代价是
+    要把该窗口的记录都读出来——但一个社团的量级下这远不是瓶颈。
     """
     dates = _recent_dates(days)
     since = dates[0]
+
+    # 筛选选项从「有绑定账号的人」里统计，与当前时间窗无关。
+    #
+    # 否则选「今日」时（经常没人做题）下拉里空空的，想按学院筛都无从下手。
+    # 另外这样选完一个学院，其他学院也还在下拉里，不用先清掉才能换。
+    #
+    # 必须在下面的早返回之前算，否则空窗口会连带把选项也清空。
+    bound_user_ids = select(Account.user_id).where(Account.verified_at.is_not(None))  # type: ignore[union-attr]
+    option_users = list(
+        db.exec(select(User).where(User.id.in_(bound_user_ids))).all()  # type: ignore[attr-defined]
+    )
+    options = PracticeFilterOptions(
+        colleges=sorted({u.college_name for u in option_users if u.college_name}),
+        enroll_years=sorted({u.enroll_year for u in option_users if u.enroll_year}, reverse=True),
+    )
 
     statement = select(DailyProgress).where(DailyProgress.date >= since)
     if platform:
@@ -90,6 +114,7 @@ def practice_rank(
             dates=dates,
             entries=[],
             generated_at=int(utcnow().timestamp()),
+            filters=options,
         )
 
     # 账号 → 人。一次查完，避免逐行查库。
@@ -130,10 +155,24 @@ def practice_rank(
                 display_name=user.display_name,
                 student_id=user.student_id,
                 enroll_year=user.enroll_year,
+                college_code=user.college_code,
+                major_code=user.major_code,
+                college_name=user.college_name,
+                major_name=user.major_name,
                 total=per_user_total.get(user_id, 0),
                 days=[PracticeDay(date=d, count=by_date.get(d, 0)) for d in dates],
             )
         )
+
+    if college:
+        entries = [e for e in entries if e.college_name == college]
+    if enroll_year is not None:
+        entries = [e for e in entries if e.enroll_year == enroll_year]
+    if q and q.strip():
+        needle = q.strip().lower()
+        entries = [
+            e for e in entries if needle in e.display_name.lower() or needle in e.student_id.lower()
+        ]
 
     # 总量降序；并列时看最近一天，还是并列就按年级和姓名稳定排序。
     entries.sort(
@@ -153,6 +192,33 @@ def practice_rank(
         dates=dates,
         entries=entries,
         generated_at=int(utcnow().timestamp()),
+        filters=options,
+    )
+
+
+@router.get("/rank", response_model=DailyPracticeResponse)
+def practice_rank(
+    _current: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+    days: int = Query(default=7, ge=1, le=90, description="统计最近多少天"),
+    platform: str | None = Query(default=None, description="只统计某个平台"),
+    include_retired: bool = Query(default=False),
+    college: str | None = Query(default=None, description="只看某个学院（学院名）"),
+    enroll_year: int | None = Query(default=None, description="只看某个年级"),
+    q: str | None = Query(default=None, description="按姓名或学号模糊搜索"),
+) -> DailyPracticeResponse:
+    """按最近 N 天的过题总数排行。需要登录。
+
+    只做参数声明，实际计算在 :func:`build_practice_rank`。
+    """
+    return build_practice_rank(
+        db,
+        days=days,
+        platform=platform,
+        include_retired=include_retired,
+        college=college,
+        enroll_year=enroll_year,
+        q=q,
     )
 
 
@@ -427,7 +493,7 @@ def dashboard(
     # 名次：拿最近 7 天的榜单，找自己在哪。
     rank_value: int | None = None
     rank_total = 0
-    board = practice_rank(_current=current, db=db, days=7, platform=None, include_retired=False)
+    board = build_practice_rank(db, days=7)
     rank_total = len(board.entries)
     for entry in board.entries:
         if entry.user_id == current.id:

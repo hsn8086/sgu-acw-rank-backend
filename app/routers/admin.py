@@ -14,11 +14,13 @@ from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
+from .. import academic
 from ..cleanup import delete_user_accounts, delete_user_references
 from ..db import get_session
 from ..deps import require_admin
 from ..models import Account, Invite, Role, User, UserSession, UserStatus, utcnow
 from ..schemas import (
+    AcademicOptions,
     AdminCreateUserRequest,
     AdminUserPage,
     InviteCreate,
@@ -290,6 +292,12 @@ def update_user(
     if payload.display_name is not None:
         user.display_name = payload.display_name
 
+    # 空串表示恢复成按学号查表。
+    if payload.college_override is not None:
+        user.college_override = payload.college_override.strip() or None
+    if payload.major_override is not None:
+        user.major_override = payload.major_override.strip() or None
+
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -359,6 +367,23 @@ def reset_password(
         "display_name": user.display_name,
         "temporary_password": temporary,
     }
+
+
+@router.get("/academics", response_model=AcademicOptions)
+def academic_options() -> AcademicOptions:
+    """学院与专业的候选列表，供管理员改学院/专业时选。
+
+    数据是静态的（学号码表），不用查库。
+    """
+    colleges = sorted(set(academic.COLLEGES.values()))
+    majors: dict[str, list[str]] = {name: [] for name in colleges}
+    for (college_code, _), major in academic.MAJORS.items():
+        college = academic.COLLEGES.get(college_code)
+        if college and major not in majors[college]:
+            majors[college].append(major)
+    for names in majors.values():
+        names.sort()
+    return AcademicOptions(colleges=colleges, majors=majors)
 
 
 @router.get("/stats")

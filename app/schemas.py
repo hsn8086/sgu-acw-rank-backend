@@ -26,6 +26,9 @@ class UserPublic(BaseModel):
     level: int
     college_code: str
     major_code: str
+    #: 学院名与专业名。管理员可改，所以可能跟自己的学号码对不上。
+    college_name: str | None = None
+    major_name: str | None = None
     role: str
     status: str
     created_at: datetime
@@ -134,6 +137,13 @@ class UpdateUserAdminRequest(BaseModel):
     status: str | None = None
     admin_note: str | None = Field(default=None, max_length=2000)
     display_name: str | None = Field(default=None, min_length=1, max_length=32)
+    #: 学院名/专业名的人工覆盖。传空串表示恢复成按学号查表。
+    #:
+    #: 名字带 override 是为了跟响应里的 college_name 区分——后者是解析结果
+    #: （可能是查表得来的），直接把响应的值原样 PATCH 回来不会意外把它钉成
+    #: 人工覆盖。
+    college_override: str | None = Field(default=None, max_length=64)
+    major_override: str | None = Field(default=None, max_length=64)
 
     @field_validator("role")
     @classmethod
@@ -258,6 +268,17 @@ class PracticeDay(BaseModel):
     count: int
 
 
+class PracticeFilterOptions(BaseModel):
+    """榜单可用的筛选项。
+
+    从**全部**有数据的人里统计，而不是从当前筛选结果里——否则选了一个学院
+    之后，其他学院就从下拉里消失，想换一个还得先清掉。
+    """
+
+    colleges: list[str] = Field(default_factory=list)
+    enroll_years: list[int] = Field(default_factory=list)
+
+
 class DailyPracticeEntry(BaseModel):
     """每日练习榜的一行，以人为单位（同平台多个账号已合并）。"""
 
@@ -266,6 +287,12 @@ class DailyPracticeEntry(BaseModel):
     student_id: str
     enroll_year: int
     rank: int = 0
+
+    #: 学院与专业。学院名可能被管理员改过，所以不一定跟 college_code 对得上。
+    college_code: str = ""
+    major_code: str = ""
+    college_name: str | None = None
+    major_name: str | None = None
 
     #: 统计窗口内的过题总数。
     total: int = 0
@@ -280,6 +307,8 @@ class DailyPracticeResponse(BaseModel):
     dates: list[str]
     entries: list[DailyPracticeEntry]
     generated_at: int
+    #: 可供筛选的学院与年级。
+    filters: PracticeFilterOptions = Field(default_factory=PracticeFilterOptions)
 
 
 class SyncStatus(BaseModel):
@@ -369,3 +398,15 @@ class DashboardSummary(BaseModel):
     #: 本周还剩几次手动刷新机会。
     refresh_remaining: int = 0
     refresh_limit: int = 0
+
+
+class AcademicOptions(BaseModel):
+    """学院与专业的候选列表，供管理员改学院/专业时选。
+
+    数据来自学号规则反推出的码表。联培码（94-97）下会挂着不同学院的专业，
+    所以同一个专业名可能出现在多个学院下——这是数据本身的样子，不是错。
+    """
+
+    colleges: list[str]
+    #: 学院名 → 该学院下的专业名（去重排序）。
+    majors: dict[str, list[str]]

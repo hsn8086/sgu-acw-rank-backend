@@ -1088,3 +1088,69 @@ def test_verified_account_is_not_rate_limited(client, root_client):
         response = client.post(f"/api/accounts/{account_id}/verify")
         assert response.status_code == 200
         assert "已经验证过" in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------- #
+# 学院名与专业名
+# --------------------------------------------------------------------------- #
+
+
+def test_college_and_major_names_resolved_from_codes(client, root_client):
+    """接口返回的成员要带上学院名与专业名，不只是码。
+
+    码表来自学号规则反推，放在 app/academic.py。
+    """
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])  # 25125023001 → 学院 25 / 专业 02
+
+    me = client.get("/api/auth/me").json()
+    assert me["college_code"] == "25"
+    assert me["major_code"] == "02"
+    assert me["college_name"] == "信息工程学院"
+    assert me["major_name"] == "软件工程"
+
+
+def test_admin_can_override_college_name(client, root_client):
+    """管理员可以改学院名。
+
+    需要可改是因为联培码（94-97）是共用的，同一个码下挂着不同学院的专业，
+    光看码推不出准确的学院名。
+    """
+    invite = _make_invite(root_client)
+    created = _register(client, invite["code"]).json()
+
+    updated = root_client.patch(
+        f"/api/admin/users/{created['id']}",
+        json={"college_override": "改过的学院"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["college_name"] == "改过的学院"
+    # 学号里的码不动，只是显示名被覆盖。
+    assert updated.json()["college_code"] == "25"
+
+
+def test_empty_override_restores_lookup(client, root_client):
+    """传空串表示恢复成按学号查表。"""
+    invite = _make_invite(root_client)
+    created = _register(client, invite["code"]).json()
+
+    root_client.patch(f"/api/admin/users/{created['id']}", json={"college_override": "临时改的"})
+    restored = root_client.patch(f"/api/admin/users/{created['id']}", json={"college_override": ""})
+    assert restored.json()["college_name"] == "信息工程学院"
+
+
+def test_academic_options_listed(client, root_client):
+    """学院与专业的候选列表要有内容，供管理员选。"""
+    body = root_client.get("/api/admin/academics").json()
+    assert "信息工程学院" in body["colleges"]
+    assert "软件工程" in body["majors"]["信息工程学院"]
+
+
+def test_unknown_college_code_yields_none():
+    """查不到的码返回 None，让调用方决定显示什么，而不是编一个名字。"""
+    from app.academic import college_name, major_name
+
+    assert college_name("99") is None
+    assert college_name(None) is None
+    assert major_name("99", "01") is None
+    assert major_name("25", "99") is None
