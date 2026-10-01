@@ -125,11 +125,15 @@ class UpdateUserAdminRequest(BaseModel):
 
     ``admin_note`` is the admin-only field; an empty string clears it. Sending
     ``None`` leaves it untouched.
+
+    学号不在可改字段里：它是登录名，改它等于换了个账号。真需要纠正时走
+    单独的接口，那里会一并检查是否与现有学号冲突。
     """
 
     role: str | None = None
     status: str | None = None
     admin_note: str | None = Field(default=None, max_length=2000)
+    display_name: str | None = Field(default=None, min_length=1, max_length=32)
 
     @field_validator("role")
     @classmethod
@@ -144,6 +148,56 @@ class UpdateUserAdminRequest(BaseModel):
         if value is not None and value not in ("active", "disabled"):
             raise ValueError("未知的状态")
         return value
+
+    @field_validator("display_name")
+    @classmethod
+    def _strip_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("姓名不能为空")
+        return cleaned
+
+
+class AdminCreateUserRequest(BaseModel):
+    """管理员直接建号，不需要邀请码。
+
+    用于代那些不自己注册的人建号，比如已经毕业但还在榜上的成员。
+    """
+
+    student_id: str = Field(min_length=1, max_length=16)
+    display_name: str = Field(min_length=1, max_length=32)
+    password: str = Field(min_length=8, max_length=128)
+    role: str = Field(default=Role.MEMBER)
+    admin_note: str = Field(default="", max_length=2000)
+
+    @field_validator("display_name")
+    @classmethod
+    def _strip_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("姓名不能为空")
+        return cleaned
+
+    @field_validator("role")
+    @classmethod
+    def _known_role(cls, value: str) -> str:
+        if value not in Role.ALL:
+            raise ValueError("未知的角色")
+        return value
+
+
+class AdminUserPage(BaseModel):
+    """成员列表的一页。带上总数与筛选后的数量，供分页控件使用。"""
+
+    items: list[UserAdmin]
+    total: int
+    page: int
+    page_size: int
+    #: 可选值，让前端不必写死年级下拉的选项。
+    enroll_years: list[int]
+    college_codes: list[str]
 
 
 class AccountPublic(BaseModel):

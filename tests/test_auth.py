@@ -60,6 +60,11 @@ def root_client(env):
         yield c
 
 
+def _members(client) -> list[dict]:
+    """取成员列表。接口现在返回分页对象，这里只关心 items。"""
+    return client.get("/api/admin/users").json()["items"]
+
+
 def _make_invite(client: TestClient, **overrides) -> dict:
     payload = {"max_uses": 1, "ttl_hours": 24, "grants_role": "member", "note": ""}
     payload.update(overrides)
@@ -252,7 +257,7 @@ def test_logout_is_idempotent(client):
 def test_disabled_account_cannot_log_in(client, root_client):
     invite = _make_invite(root_client)
     _register(client, invite["code"])
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     member = next(m for m in members if m["student_id"] == MEMBER_STUDENT_ID)
 
     patch = root_client.patch(f"/api/admin/users/{member['id']}", json={"status": "disabled"})
@@ -350,7 +355,7 @@ def test_member_cannot_reach_admin_endpoints(client, root_client):
 def test_admin_note_is_writable_by_admin_and_hidden_from_members(client, root_client):
     invite = _make_invite(root_client)
     _register(client, invite["code"])
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     member = next(m for m in members if m["student_id"] == MEMBER_STUDENT_ID)
 
     # Admin can write and read it.
@@ -360,7 +365,7 @@ def test_admin_note_is_writable_by_admin_and_hidden_from_members(client, root_cl
     assert response.status_code == 200
     assert response.json()["admin_note"] == "已核实，学号曾被他人占用"
 
-    listed = root_client.get("/api/admin/users").json()
+    listed = _members(root_client)
     assert (
         next(m for m in listed if m["id"] == member["id"])["admin_note"]
         == "已核实，学号曾被他人占用"
@@ -377,7 +382,7 @@ def test_admin_note_is_writable_by_admin_and_hidden_from_members(client, root_cl
 
 
 def test_admin_note_can_be_cleared(client, root_client):
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     root = next(m for m in members if m["student_id"] == ROOT_STUDENT_ID)
 
     root_client.patch(f"/api/admin/users/{root['id']}", json={"admin_note": "临时备注"})
@@ -398,7 +403,7 @@ def test_admin_cannot_promote_to_admin(client, root_client):
     )
     assert admin_client.get("/api/admin/users").status_code == 200
 
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     target = next(m for m in members if m["student_id"] == ROOT_STUDENT_ID)
     response = admin_client.patch(f"/api/admin/users/{target['id']}", json={"role": "admin"})
     assert response.status_code == 403
@@ -410,7 +415,7 @@ def test_invite_cannot_grant_root(client, root_client):
 
 
 def test_root_cannot_be_demoted_or_disabled(client, root_client):
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     root = next(m for m in members if m["student_id"] == ROOT_STUDENT_ID)
     assert root["role"] == "root"
 
@@ -427,7 +432,7 @@ def test_root_cannot_be_demoted_or_disabled(client, root_client):
 def test_reset_password_returns_temporary_and_invalidates_old(client, root_client):
     invite = _make_invite(root_client)
     _register(client, invite["code"])
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     member = next(m for m in members if m["student_id"] == MEMBER_STUDENT_ID)
 
     response = root_client.post(f"/api/admin/users/{member['id']}/reset-password")
@@ -481,7 +486,7 @@ def test_directory_lists_active_members(client, root_client):
 def test_disabled_members_are_hidden_from_the_directory(client, root_client):
     invite = _make_invite(root_client)
     _register(client, invite["code"])
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     member = next(m for m in members if m["student_id"] == MEMBER_STUDENT_ID)
     root_client.patch(f"/api/admin/users/{member['id']}", json={"status": "disabled"})
 
@@ -552,8 +557,206 @@ def test_session_endpoint_returns_user_when_logged_in(client):
 def test_session_endpoint_ignores_a_disabled_account(client, root_client):
     invite = _make_invite(root_client)
     _register(client, invite["code"])
-    members = root_client.get("/api/admin/users").json()
+    members = _members(root_client)
     member = next(m for m in members if m["student_id"] == MEMBER_STUDENT_ID)
     root_client.patch(f"/api/admin/users/{member['id']}", json={"status": "disabled"})
 
     assert client.get("/api/auth/session").json() == {"user": None}
+
+
+# --------------------------------------------------------------------------- #
+# 成员管理的筛选与 CRUD
+# --------------------------------------------------------------------------- #
+
+
+def _seed_members(client, root_client, count=3):
+    """建几个不同年级的成员，供筛选测试用。"""
+    invite = _make_invite(root_client, max_uses=count)
+    created = []
+    for index in range(count):
+        response = _register(
+            client,
+            invite["code"],
+            student_id=f"251250230{index + 1:02d}",
+            password="password12345",
+        )
+        created.append(response.json())
+    return created
+
+
+def test_member_list_is_paginated(client, root_client):
+    _seed_members(client, root_client, 3)
+    body = root_client.get("/api/admin/users?page_size=2").json()
+
+    assert body["total"] == 4  # root + 3
+    assert body["page"] == 1
+    assert body["page_size"] == 2
+    assert len(body["items"]) == 2
+    # 选项由后端给出，前端不写死。
+    assert 2025 in body["enroll_years"]
+    assert "25" in body["college_codes"]
+
+
+def test_member_list_second_page(client, root_client):
+    _seed_members(client, root_client, 3)
+    first = root_client.get("/api/admin/users?page_size=2&page=1").json()
+    second = root_client.get("/api/admin/users?page_size=2&page=2").json()
+
+    assert len(second["items"]) == 2
+    # 两页不重叠。
+    assert {u["id"] for u in first["items"]} & {u["id"] for u in second["items"]} == set()
+
+
+def test_search_by_student_id_prefix(client, root_client):
+    _seed_members(client, root_client, 3)
+    body = root_client.get("/api/admin/users?q=25125023001").json()
+    assert body["total"] == 1
+    assert body["items"][0]["student_id"] == "25125023001"
+
+
+def test_search_by_name_substring(client, root_client):
+    """姓名按包含匹配，搜中间几个字也能找到。"""
+    _seed_members(client, root_client, 2)
+    body = root_client.get("/api/admin/users?q=测试").json()
+    assert body["total"] == 2
+
+
+def test_filter_by_role_and_status(client, root_client):
+    _seed_members(client, root_client, 2)
+
+    roots = root_client.get("/api/admin/users?role=root").json()
+    assert roots["total"] == 1
+    assert roots["items"][0]["role"] == "root"
+
+    members = root_client.get("/api/admin/users?role=member").json()
+    assert members["total"] == 2
+
+
+def test_filter_by_enroll_year(client, root_client):
+    _seed_members(client, root_client, 2)
+    body = root_client.get("/api/admin/users?enroll_year=2025").json()
+    assert body["total"] == 2
+
+
+def test_filter_by_account_binding(client, root_client):
+    """has_account 用来找出还没绑账号的人。"""
+    _seed_members(client, root_client, 2)
+
+    # 都没绑，所以全部落在 false 一侧。
+    unbound = root_client.get("/api/admin/users?has_account=false").json()
+    assert unbound["total"] == 3
+    bound = root_client.get("/api/admin/users?has_account=true").json()
+    assert bound["total"] == 0
+
+
+def test_invalid_role_filter_is_rejected(client, root_client):
+    response = root_client.get("/api/admin/users?role=bogus")
+    assert response.status_code == 400
+
+
+def test_page_zero_is_rejected(client, root_client):
+    assert root_client.get("/api/admin/users?page=0").status_code == 422
+
+
+def test_admin_can_create_user_without_invite(client, root_client):
+    response = root_client.post(
+        "/api/admin/users",
+        json={
+            "student_id": "23125023001",
+            "display_name": "代建成员",
+            "password": "createdpassword",
+            "role": "member",
+            "admin_note": "管理员代建",
+        },
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["enroll_year"] == 2023
+    assert body["college_code"] == "25"
+    assert body["admin_note"] == "管理员代建"
+
+    # 建完就能登录。
+    fresh = TestClient(client.app)
+    assert (
+        fresh.post(
+            "/api/auth/login",
+            json={"student_id": "23125023001", "password": "createdpassword"},
+        ).status_code
+        == 200
+    )
+
+
+def test_admin_create_rejects_duplicate_student_id(client, root_client):
+    payload = {
+        "student_id": "23125023001",
+        "display_name": "甲",
+        "password": "createdpassword",
+    }
+    assert root_client.post("/api/admin/users", json=payload).status_code == 201
+    assert root_client.post("/api/admin/users", json=payload).status_code == 409
+
+
+def test_admin_create_rejects_bad_student_id(client, root_client):
+    response = root_client.post(
+        "/api/admin/users",
+        json={"student_id": "12345", "display_name": "甲", "password": "createdpassword"},
+    )
+    assert response.status_code == 400
+
+
+def test_admin_cannot_create_root(client, root_client):
+    response = root_client.post(
+        "/api/admin/users",
+        json={
+            "student_id": "23125023001",
+            "display_name": "假root",
+            "password": "createdpassword",
+            "role": "root",
+        },
+    )
+    assert response.status_code == 403
+
+
+def test_admin_can_edit_display_name(client, root_client):
+    _seed_members(client, root_client, 1)
+    member = next(u for u in _members(root_client) if u["role"] == "member")
+    response = root_client.patch(
+        f"/api/admin/users/{member['id']}", json={"display_name": "新名字"}
+    )
+    assert response.status_code == 200
+    assert response.json()["display_name"] == "新名字"
+
+
+def test_delete_user_removes_accounts_and_sessions(client, root_client):
+    _seed_members(client, root_client, 1)
+    member = next(u for u in _members(root_client) if u["role"] == "member")
+
+    # 成员当前是登录状态（注册时种了 cookie）。
+    assert client.get("/api/auth/me").status_code == 200
+
+    assert root_client.delete(f"/api/admin/users/{member['id']}").status_code == 204
+    assert member["student_id"] not in {u["student_id"] for u in _members(root_client)}
+
+
+def test_cannot_delete_self(client, root_client):
+    root = next(u for u in _members(root_client) if u["role"] == "root")
+    response = root_client.delete(f"/api/admin/users/{root['id']}")
+    assert response.status_code == 400
+    assert "自己" in response.json()["detail"]
+
+
+def test_cannot_delete_root_by_other_admin(client, root_client):
+    """管理员不能删 root，即使不是自己。"""
+    _seed_members(client, root_client, 1)
+    invite = _make_invite(root_client, grants_role="admin")
+    _register(client, invite["code"], student_id="25125023099", password="password12345")
+
+    admin_client = TestClient(client.app)
+    admin_client.post(
+        "/api/auth/login",
+        json={"student_id": "25125023099", "password": "password12345"},
+    )
+    assert admin_client.get("/api/admin/users").status_code == 200
+
+    root = next(u for u in _members(root_client) if u["role"] == "root")
+    assert admin_client.delete(f"/api/admin/users/{root['id']}").status_code == 403

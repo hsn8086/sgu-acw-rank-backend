@@ -10,18 +10,23 @@ from __future__ import annotations
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import or_
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
 from ..db import get_session
 from ..deps import require_admin
-from ..models import Invite, Role, User, UserSession, UserStatus, utcnow
+from ..models import Account, Invite, Role, User, UserSession, UserStatus, utcnow
 from ..schemas import (
+    AdminCreateUserRequest,
+    AdminUserPage,
     InviteCreate,
     InvitePublic,
     UpdateUserAdminRequest,
     UserAdmin,
 )
 from ..security import hash_password, new_invite_code, new_temporary_password
+from ..student_id import StudentIdError, parse_student_id
 
 router = APIRouter(
     prefix="/admin",
@@ -108,11 +113,132 @@ def revoke_invite(
 # --------------------------------------------------------------------------- #
 
 
-@router.get("/users", response_model=list[UserAdmin])
+@router.get("/users", response_model=AdminUserPage)
 def list_users(
     db: Session = Depends(get_session),
-) -> list[User]:
-    return list(db.exec(select(User).order_by(User.enroll_year.desc(), User.student_id)).all())  # type: ignore[attr-defined]
+    q: str | None = Query(default=None, description="按学号或姓名模糊搜索"),
+    role: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    enroll_year: int | None = Query(default=None),
+    college_code: str | None = Query(default=None),
+    has_account: bool | None = Query(default=None, description="是否已绑定平台账号"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
+    sort: str = Query(
+        default="enroll_year", description="enroll_year|student_id|display_name|created_at"
+    ),
+) -> AdminUserPage:
+    """成员列表，支持搜索、筛选、排序与分页。
+
+    过滤都在数据库里做，不是取全部再在 Python 里筛——成员多起来之后
+    后者会随人数线性变慢。
+    """
+    statement = select(User)
+
+    if q and q.strip():
+        # 学号按前缀匹配，姓名按包含匹配：学号输一半也能搜到。
+        needle = q.strip()
+        statement = statement.where(
+            or_(User.student_id.startswith(needle), User.display_name.contains(needle))  # type: ignore[union-attr]
+        )
+
+    if role:
+        if role not in Role.ALL:
+            raise HTTPException(status_code=400, detail="未知的角色")
+        statement = statement.where(User.role == role)
+
+    if status:
+        statement = statement.where(User.status == status)
+
+    if enroll_year is not None:
+        statement = statement.where(User.enroll_year == enroll_year)
+
+    if college_code:
+        statement = statement.where(User.college_code == college_code)
+
+    if has_account is not None:
+        # 用子查询而不是 join：一个人绑了多个账号时 join 会出现重复行。
+        bound = select(Account.user_id).where(Account.verified_at.is_not(None))  # type: ignore[union-attr]
+        if has_account:
+            statement = statement.where(User.id.in_(bound))  # type: ignore[attr-defined]
+        else:
+            statement = statement.where(User.id.not_in(bound))  # type: ignore[attr-defined]
+
+    # 总数要在分页之前算。
+    total = len(db.exec(statement).all())
+
+    sort_columns = {
+        "enroll_year": (User.enroll_year.desc(), User.student_id),  # type: ignore[union-attr]
+        "student_id": (User.student_id,),
+        "display_name": (User.display_name,),
+        "created_at": (User.created_at.desc(),),  # type: ignore[union-attr]
+    }
+    order_by = sort_columns.get(sort, sort_columns["enroll_year"])
+    statement = statement.order_by(*order_by).offset((page - 1) * page_size).limit(page_size)
+
+    items = list(db.exec(statement).all())
+
+    # 供前端渲染筛选下拉，免得选项写死在两处。
+    years = sorted(
+        {y for y in db.exec(select(User.enroll_year).distinct()).all() if y},  # type: ignore[attr-defined]
+        reverse=True,
+    )
+    colleges = sorted({c for c in db.exec(select(User.college_code).distinct()).all() if c})  # type: ignore[attr-defined]
+
+    return AdminUserPage(
+        items=[UserAdmin.model_validate(u) for u in items],
+        total=total,
+        page=page,
+        page_size=page_size,
+        enroll_years=years,
+        college_codes=colleges,
+    )
+
+
+@router.post("/users", response_model=UserAdmin, status_code=status.HTTP_201_CREATED)
+def create_user(
+    payload: AdminCreateUserRequest,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+) -> User:
+    """管理员直接建号，不用邀请码。
+
+    权限规则与邀请码一致：不能造 root，只有 root 能造管理员。
+    """
+    if payload.role == Role.ROOT:
+        raise HTTPException(status_code=403, detail="不能直接创建 root 账号")
+    if payload.role == Role.ADMIN and not admin.is_root:
+        raise HTTPException(status_code=403, detail="只有 root 可以创建管理员")
+
+    try:
+        parsed = parse_student_id(payload.student_id)
+    except StudentIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if db.exec(select(User).where(User.student_id == parsed.raw)).first() is not None:
+        raise HTTPException(status_code=409, detail="该学号已注册")
+
+    user = User(
+        student_id=parsed.raw,
+        password_hash=hash_password(payload.password),
+        display_name=payload.display_name,
+        enroll_year=parsed.enroll_year,
+        level=parsed.level,
+        college_code=parsed.college_code,
+        major_code=parsed.major_code,
+        role=payload.role,
+        status=UserStatus.ACTIVE,
+        admin_note=payload.admin_note,
+        created_at=utcnow(),
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="该学号已注册") from exc
+    db.refresh(user)
+    return user
 
 
 @router.get("/users/{user_id}", response_model=UserAdmin)
@@ -160,10 +286,45 @@ def update_user(
     if payload.admin_note is not None:
         user.admin_note = payload.admin_note
 
+    if payload.display_name is not None:
+        user.display_name = payload.display_name
+
     db.add(user)
     db.commit()
     db.refresh(user)
     return user
+
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: int,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+) -> Response:
+    """删除成员，连同其会话与平台账号。
+
+    只能删成员：管理员和 root 要先降级再删，避免一次误操作把管理员清空。
+    也不能删自己，否则会当场把自己踢出去。
+    """
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    if user.id == admin.id:
+        raise HTTPException(status_code=400, detail="不能删除自己")
+    if user.is_root:
+        raise HTTPException(status_code=403, detail="不能删除 root 账号")
+    if user.role == Role.ADMIN and not admin.is_root:
+        raise HTTPException(status_code=403, detail="只有 root 可以删除管理员")
+
+    # 会话和账号都跟着走。账号上挂的每日记录由外键级联处理，这里显式删一遍
+    # 以免依赖数据库的级联设置。
+    for row in db.exec(select(UserSession).where(UserSession.user_id == user.id)).all():
+        db.delete(row)
+    for account in db.exec(select(Account).where(Account.user_id == user.id)).all():
+        db.delete(account)
+    db.delete(user)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/users/{user_id}/reset-password")
