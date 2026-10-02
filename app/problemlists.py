@@ -23,6 +23,7 @@ from .models import (
     ProblemListItem,
     SolvedSnapshot,
 )
+from .problems import problem_url
 from .schemas import (
     ProblemEntry,
     ProblemListDetail,
@@ -87,11 +88,21 @@ def to_entry(item: ProblemListItem, cache: ProblemCache | None, done: bool | Non
         note=item.note,
         done=done,
     )
+    # 题面地址一律现算，不用缓存里的那份。
+    #
+    # 地址完全由「平台 + 题号」决定，没有抓取才能知道的成分，所以现算
+    # 总是对的。而缓存里的那份会过期：修过一次牛客的地址拼接（原来把
+    # ``nowcoder`` 当成来源，全部落到搜索页），但缓存里存着的是修复前
+    # 拼出来的坏地址，不现算的话用户点的还是坏链接。
+    entry.url = problem_url(item.platform, item.key)
+
     if cache is not None:
         entry.name = cache.name
         entry.rating = cache.rating
         entry.tags = json.loads(cache.tags_json or "[]")
-        entry.url = cache.url
+        # 缓存里的地址只在现算不出结果时兜底。
+        if not entry.url:
+            entry.url = cache.url
         entry.missing_reason = cache.missing_reason
     else:
         entry.missing_reason = "题目信息还没抓取"

@@ -13,7 +13,7 @@ import json
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
 from ..db import get_session
 from ..deps import get_optional_user, require_admin, require_origin_secret
@@ -365,6 +365,34 @@ def _fetch_and_cache(db: Session, platform: str, key: str):
     row.fetched_at = utcnow()
     db.commit()
     return info
+
+
+@router.post("/purge-problem-cache")
+def purge_problem_cache(
+    platform: str | None = Query(default=None, description="只清这个平台，不填则全清"),
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+) -> dict:
+    """清掉题目信息缓存，让它下次访问时重新抓。
+
+    **为什么需要这个接口**：缓存没有过期时间（题名和难度基本不变，设过期
+    只会白白请求对方服务器），但抓取逻辑本身会改。改完之后缓存里还是按
+    旧逻辑抓出来的结果，而且永远不会被覆盖——牛客就踩过：地址拼接修好了，
+    缓存里存的还是修复前拼出来的搜索页链接。
+
+    清掉之后不影响题单本身，只是下次打开题单时会重新抓一遍题名。抓取要
+    逐题请求（洛谷、牛客、AtCoder 都是），题多的时候会慢一些，所以做成
+    显式操作而不是自动触发。
+    """
+    statement = delete(ProblemCache)
+    if platform:
+        if platform not in Platform.ALL:
+            raise HTTPException(status_code=400, detail="未知的平台")
+        statement = statement.where(ProblemCache.platform == platform)  # type: ignore[arg-type]
+
+    result = db.exec(statement)
+    db.commit()
+    return {"deleted": result.rowcount or 0, "platform": platform}
 
 
 @router.post("/refresh-codeforces")

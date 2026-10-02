@@ -6,6 +6,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session, select
 
 ROOT_STUDENT_ID = "00000000000"
 ROOT_PASSWORD = "devpassword123"
@@ -506,3 +507,32 @@ def test_completion_rank_of_empty_list(root_client):
 
 def test_completion_rank_of_missing_list(root_client):
     assert root_client.get("/api/problem-lists/99999/rank").status_code == 404
+
+
+def test_purge_problem_cache(root_client, env):
+    """清缓存接口把对应平台的缓存删掉。"""
+    from app.db import get_engine
+    from app.models import ProblemCache
+
+    with Session(get_engine()) as session:
+        session.add(ProblemCache(platform="nowcoder", key="nowcoder:contest:1", name="甲"))
+        session.add(ProblemCache(platform="luogu", key="P1001", name="乙"))
+        session.commit()
+
+    response = root_client.post("/api/problem-lists/purge-problem-cache?platform=nowcoder")
+    assert response.status_code == 200, response.text
+    assert response.json()["deleted"] == 1
+
+    with Session(get_engine()) as session:
+        left = session.exec(select(ProblemCache)).all()
+    assert [(r.platform, r.key) for r in left] == [("luogu", "P1001")]
+
+
+def test_purge_problem_cache_rejects_unknown_platform(root_client, env):
+    response = root_client.post("/api/problem-lists/purge-problem-cache?platform=nope")
+    assert response.status_code == 400
+
+
+def test_purge_problem_cache_requires_admin(member_client, env):
+    response = member_client.post("/api/problem-lists/purge-problem-cache")
+    assert response.status_code == 403

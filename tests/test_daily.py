@@ -1316,3 +1316,28 @@ def test_atcoder_url_without_underscore_falls_back(env):
     from app.problems import problem_url
 
     assert problem_url(Platform.ATCODER, "abc300") == "https://atcoder.jp/contests/"
+
+
+def test_problem_entry_url_is_computed_not_cached(env):
+    """题单里的题面地址现算，不用缓存里那份。
+
+    缓存没有过期时间，抓取逻辑改了之后旧结果会一直留着。牛客踩过：
+    地址拼接修好了，缓存里存的还是修复前拼出来的搜索页链接，用户点的
+    还是坏链接。
+    """
+    from app.models import ProblemCache, ProblemListItem
+    from app.problemlists import to_entry
+
+    item = ProblemListItem(list_id=1, platform="nowcoder", key="nowcoder:contest:233234")
+    stale = ProblemCache(
+        platform="nowcoder",
+        key="nowcoder:contest:233234",
+        name="233234",
+        url="https://www.nowcoder.com/exam/oj",  # 修复前缓存下来的坏地址
+    )
+
+    entry = to_entry(item, stale, None)
+
+    assert entry.url == "https://ac.nowcoder.com/acm/problem/233234"
+    # 名字仍然来自缓存——那个没法现算
+    assert entry.name == "233234"
