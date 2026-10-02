@@ -40,6 +40,12 @@ from .models import Platform
 
 logger = logging.getLogger("sgu_acw.platforms")
 
+#: 主站接口专用的 User-Agent。
+#:
+#: 不能用外层那个完整的 Chrome UA——阿里云 WAF 会把它当成浏览器流量拦下来，
+#: 返回一个 HTML 挑战页（HTTP 200，内容是网页）。用这个短写法反而放行。
+_NOWCODER_API_UA = "Mozilla/5.0"
+
 #: 统计口径按东八区。牛客页面上的时间没有时区标记，本身就是北京时间。
 CST = timezone(timedelta(hours=8))
 
@@ -596,7 +602,15 @@ def _nowcoder_main_solved(client: httpx.Client, identifier: str) -> dict[str, in
         response = client.post(
             "https://gw-c.nowcoder.com/api/sparta/user/question-training/submission-history",
             json={"userId": int(identifier), "pageNo": page, "pageSize": page_size},
-            headers={"Origin": "https://www.nowcoder.com", "Referer": "https://www.nowcoder.com/"},
+            headers={
+                "Origin": "https://www.nowcoder.com",
+                "Referer": "https://www.nowcoder.com/",
+                # UA 必须覆盖成这个短写法。用外层那个完整的 Chrome UA 会被
+                # 阿里云 WAF 拦下，返回一个 HTML 挑战页（HTTP 200，但内容是
+                # 网页不是 JSON），json() 就抛异常。
+                # 反直觉：越像浏览器越容易被拦。
+                "User-Agent": _NOWCODER_API_UA,
+            },
         )
         if response.status_code != 200:
             if page == 1:

@@ -1139,3 +1139,56 @@ def test_rank_entry_carries_college_names(env):
         assert entry.college_code == "25"
         assert entry.college_name == "信息工程学院"
         assert entry.major_name == "软件工程"
+
+
+def test_nowcoder_main_uses_its_own_user_agent(env):
+    """主站接口要用短 UA，不能用外层那个完整 Chrome UA。
+
+    阿里云 WAF 会把完整 Chrome UA 当成浏览器流量拦下来，返回一个 HTML
+    挑战页（HTTP 200，但内容是网页不是 JSON）。反直觉——越像浏览器越
+    容易被拦。
+
+    这个坑很隐蔽：单独调用主站函数时用的是简单 UA，一切正常；只有走
+    sync 的完整路径（用 Chrome UA）才会失败，而且失败是静默的。
+    """
+    from app.platforms import _NOWCODER_API_UA, _nowcoder_main_solved
+
+    seen: dict[str, str] = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"success": True, "code": 0, "data": {"total": 0, "records": []}}
+
+    class FakeClient:
+        def post(self, *args, **kwargs):
+            seen.update(kwargs.get("headers") or {})
+            return FakeResponse()
+
+    _nowcoder_main_solved(FakeClient(), "825377486")
+
+    assert seen.get("User-Agent") == _NOWCODER_API_UA
+    assert "Chrome" not in seen.get("User-Agent", "")
+
+
+def test_nowcoder_main_reports_html_response_as_error(env):
+    """返回 HTML（被 WAF 拦）时要报错，不能当成「没有记录」。"""
+    from app.platforms import FetchError, _nowcoder_main_solved
+
+    class FakeResponse:
+        status_code = 200
+        text = "<!doctype html><meta name='aliyun_waf_aa'>"
+
+        @staticmethod
+        def json():
+            raise ValueError("not json")
+
+    class FakeClient:
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    with pytest.raises(FetchError) as exc:
+        _nowcoder_main_solved(FakeClient(), "825377486")
+    assert "无法解析" in str(exc.value)
