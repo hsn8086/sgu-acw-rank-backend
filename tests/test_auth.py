@@ -1342,3 +1342,100 @@ def test_invite_creator_is_the_admin_who_made_it(client, root_client):
 
     assert invite["created_by_name"] == "测试成员"
     assert invite["created_by_student_id"] == "25125023016"
+
+
+# --------------------------------------------------------------------------- #
+# 管理员视角的成员详情
+# --------------------------------------------------------------------------- #
+
+
+def test_admin_member_detail_shows_sync_health(client, root_client):
+    """管理员看成员详情时，能拿到同步健康度。
+
+    这一块是用来回答「这个人为什么没数据」的：账号验证没过、抓取一直失败、
+    或者人本来就不做题了——三者从公开信息里都看不出来。
+    """
+    invite = _make_invite(root_client)
+    created = _register(client, invite["code"], student_id="25125023020").json()
+
+    detail = root_client.get(f"/api/admin/members/{created['id']}").json()
+    assert detail["student_id"] == "25125023020"
+    # 公开信息也在里面，管理页不必再拉一次
+    assert detail["college_name"] == "信息工程学院"
+    # 排查用的字段
+    assert "admin_note" in detail
+    assert "last_login_at" in detail
+    assert detail["total_solved"] == 0
+    assert detail["accounts"] == []
+
+
+def test_admin_member_detail_lists_account_health(client, root_client):
+    """每个账号的健康度要能单独看到。
+
+    一个成员可能绑了好几个号，问题往往只出在其中一个上。
+    """
+    from unittest.mock import patch
+
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.models import Account, utcnow
+    from app.platforms import Profile
+
+    invite = _make_invite(root_client)
+    created = _register(client, invite["code"], student_id="25125023021").json()
+
+    with patch(
+        "app.routers.accounts.fetch_profile",
+        return_value=Profile(platform="codeforces", identifier="healthy", signature=""),
+    ):
+        client.post("/api/accounts", json={"platform": "codeforces", "identifier": "healthy"})
+
+    # 造一个连续失败的账号
+    with Session(get_engine()) as db:
+        db.add(
+            Account(
+                user_id=created["id"],
+                platform="luogu",
+                identifier="809016",
+                created_at=utcnow(),
+                verified_at=utcnow(),
+                consecutive_failures=3,
+                last_error="洛谷返回 403",
+            )
+        )
+        db.commit()
+
+    detail = root_client.get(f"/api/admin/members/{created['id']}").json()
+    assert len(detail["accounts"]) == 2
+    assert detail["failing_accounts"] == 1
+
+    failing = next(a for a in detail["accounts"] if a["consecutive_failures"] > 0)
+    assert failing["platform"] == "luogu"
+    assert failing["last_error"] == "洛谷返回 403"
+
+
+def test_member_cannot_read_admin_detail(client, root_client):
+    """普通成员拿不到这一段。界面上不显示，接口也必须挡住。"""
+    from app.main import create_app
+
+    invite = _make_invite(root_client)
+    created = _register(client, invite["code"], student_id="25125023022").json()
+
+    member = TestClient(create_app())
+    member.post(
+        "/api/auth/login",
+        json={"student_id": "25125023022", "password": MEMBER_PASSWORD},
+    )
+    assert member.get(f"/api/admin/members/{created['id']}").status_code == 403
+
+
+def test_anonymous_cannot_read_admin_detail(root_client):
+    """未登录同样拿不到。"""
+    from app.main import create_app
+
+    invite = _make_invite(root_client)
+    created = _register(TestClient(create_app()), invite["code"], student_id="25125023023").json()
+
+    anon = TestClient(create_app())
+    assert anon.get(f"/api/admin/members/{created['id']}").status_code == 401

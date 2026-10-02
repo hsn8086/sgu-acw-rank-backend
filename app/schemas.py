@@ -543,3 +543,81 @@ class ProblemLookup(BaseModel):
     missing_reason: str = ""
     #: 这个题号在现有缓存里有没有。没有的话前端提示「未收录」。
     cached: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# 管理员视角的成员详情
+# --------------------------------------------------------------------------- #
+
+
+class AdminAccountDetail(BaseModel):
+    """管理员看到的一个平台账号。
+
+    比成员自己看到的多出同步健康度：抓取时间、失败次数、最近错误。这些
+    是用来排查「这个人为什么没数据」的，对成员本人没有意义。
+    """
+
+    id: int
+    platform: str
+    identifier: str
+    display_name: str | None = None
+
+    verified_at: datetime | None = None
+    #: 验证尝试次数。冷却时间随它翻倍。
+    verify_attempts: int = 0
+    verify_attempted_at: datetime | None = None
+
+    rating: int | None = None
+    max_rating: int | None = None
+    rating_fetched_at: datetime | None = None
+    solved_fetched_at: datetime | None = None
+    #: 最后一次**抓到新题**的时间。与 solved_fetched_at 不同：后者只是
+    #: 「最后一次去看」。
+    last_active_at: datetime | None = None
+
+    #: 最近一次抓取出错的原因。
+    last_error: str | None = None
+    consecutive_failures: int = 0
+    rating_failures: int = 0
+
+    created_at: datetime
+    #: 已过题目数。来自最近一次快照。
+    solved_count: int = 0
+    #: 有多少天的练习记录。
+    active_days: int = 0
+
+
+class AdminMemberDetail(BaseModel):
+    """管理员视角的成员详情。
+
+    在公开信息之外，加上排查用的那一块：备注、最后登录、账号同步状态。
+    """
+
+    id: int
+    display_name: str
+    student_id: str
+    enroll_year: int
+    level: int
+    college_code: str
+    major_code: str
+    college_name: str | None = None
+    major_name: str | None = None
+    class_label: str | None = None
+    role: str
+    status: str
+
+    #: 仅管理员可见的备注。
+    admin_note: str = ""
+    last_login_at: datetime | None = None
+    created_at: datetime
+
+    accounts: list[AdminAccountDetail] = Field(default_factory=list)
+
+    #: 汇总，给一眼看的数字。
+    total_solved: int = 0
+    #: 最近 30 天有几天做过题。
+    active_days_30: int = 0
+    #: 最后一次做对题是哪天。用来判断这个人是不是掉队了。
+    last_practice_date: str | None = None
+    #: 有几个账号处于连续失败状态。
+    failing_accounts: int = 0

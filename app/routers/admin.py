@@ -7,7 +7,7 @@ like promoting someone to root or touching a root account.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import or_
@@ -18,10 +18,22 @@ from .. import academic
 from ..cleanup import delete_user_accounts, delete_user_references
 from ..db import get_session
 from ..deps import require_admin
-from ..models import Account, Invite, Role, User, UserSession, UserStatus, utcnow
+from ..models import (
+    Account,
+    DailyProgress,
+    Invite,
+    Role,
+    SolvedSnapshot,
+    User,
+    UserSession,
+    UserStatus,
+    utcnow,
+)
 from ..schemas import (
     AcademicOptions,
+    AdminAccountDetail,
     AdminCreateUserRequest,
+    AdminMemberDetail,
     AdminUserPage,
     InviteCreate,
     InvitePublic,
@@ -420,3 +432,122 @@ def stats(db: Session = Depends(get_session)) -> dict:
         "admin_count": int(admins),
         "usable_invite_count": len(live_invites),
     }
+
+
+@router.get("/members/{user_id}", response_model=AdminMemberDetail)
+def get_member_detail(
+    user_id: int,
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_session),
+) -> AdminMemberDetail:
+    """成员详情的管理员视角。
+
+    比公开信息多出一块排查用的数据：仅管理员可见的备注、最后登录时间、
+    每个平台账号的同步健康度（抓取时间、失败次数、最近错误）。
+
+    这些不是「更多信息」，而是回答一个具体问题用的：**这个人为什么没数据**。
+    常见原因是账号验证没过、平台抓取一直失败、或者人本来就不做题了——
+    这三者从公开信息里看不出来。
+    """
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="成员不存在")
+
+    import json as _json
+
+    from ..sync import current_practice_day
+
+    accounts = list(db.exec(select(Account).where(Account.user_id == user_id)).all())
+    account_ids = [a.id for a in accounts if a.id is not None]
+
+    # 已过题目数与练习天数，一次查完，别在循环里逐个查。
+    solved_by_account: dict[int, int] = {}
+    if account_ids:
+        for snapshot in db.exec(
+            select(SolvedSnapshot).where(
+                SolvedSnapshot.account_id.in_(account_ids)  # type: ignore[attr-defined]
+            )
+        ).all():
+            try:
+                solved_by_account[snapshot.account_id] = len(
+                    _json.loads(snapshot.problems_json or "[]")
+                )
+            except (TypeError, ValueError):
+                solved_by_account[snapshot.account_id] = snapshot.problem_count
+
+    active_days_by_account: dict[int, int] = {}
+    if account_ids:
+        rows = db.exec(
+            select(DailyProgress.account_id, func.count())  # type: ignore[call-overload]
+            .where(
+                DailyProgress.account_id.in_(account_ids),  # type: ignore[attr-defined]
+                DailyProgress.solved_count > 0,
+            )
+            .group_by(DailyProgress.account_id)  # type: ignore[arg-type]
+        ).all()
+        for account_id, count in rows:
+            active_days_by_account[account_id] = count
+
+    details = [
+        AdminAccountDetail(
+            id=a.id or 0,
+            platform=a.platform,
+            identifier=a.identifier,
+            display_name=a.display_name,
+            verified_at=a.verified_at,
+            verify_attempts=a.verify_attempts,
+            verify_attempted_at=a.verify_attempted_at,
+            rating=a.rating,
+            max_rating=a.max_rating,
+            rating_fetched_at=a.rating_fetched_at,
+            solved_fetched_at=a.solved_fetched_at,
+            last_active_at=a.last_active_at,
+            last_error=a.last_error,
+            consecutive_failures=a.consecutive_failures,
+            rating_failures=a.rating_failures,
+            created_at=a.created_at,
+            solved_count=solved_by_account.get(a.id or 0, 0),
+            active_days=active_days_by_account.get(a.id or 0, 0),
+        )
+        for a in accounts
+    ]
+
+    # 最近 30 天的活跃天数：按「人」算，同一天多个账号只算一天。
+    today = date.fromisoformat(current_practice_day())
+    cutoff = (today.fromordinal(today.toordinal() - 30)).isoformat()
+    recent_days: set[str] = set()
+    last_date: str | None = None
+    if account_ids:
+        for row in db.exec(
+            select(DailyProgress).where(
+                DailyProgress.account_id.in_(account_ids),  # type: ignore[attr-defined]
+                DailyProgress.solved_count > 0,
+            )
+        ).all():
+            if row.date >= cutoff:
+                recent_days.add(row.date)
+            if last_date is None or row.date > last_date:
+                last_date = row.date
+
+    return AdminMemberDetail(
+        id=user.id or 0,
+        display_name=user.display_name,
+        student_id=user.student_id,
+        enroll_year=user.enroll_year,
+        level=user.level,
+        college_code=user.college_code,
+        major_code=user.major_code,
+        college_name=user.college_name,
+        major_name=user.major_name,
+        class_label=user.class_label,
+        role=user.role,
+        status=user.status,
+        admin_note=user.admin_note,
+        last_login_at=user.last_login_at,
+        created_at=user.created_at,
+        accounts=details,
+        total_solved=sum(d.solved_count for d in details),
+        active_days_30=len(recent_days),
+        last_practice_date=last_date,
+        failing_accounts=sum(1 for d in details if d.consecutive_failures > 0),
+    )
