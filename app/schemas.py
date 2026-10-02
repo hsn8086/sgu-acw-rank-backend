@@ -121,7 +121,14 @@ class InvitePublic(BaseModel):
     expires_at: datetime
     revoked_at: datetime | None
     note: str
+    #: 创建者的 id。前端一般不用它，看下面两个字段就够了。
     created_by: int | None
+    #: 创建者姓名与学号。
+    #:
+    #: 邀请码是要追责的——码被转发出去、或者发错了人，得知道找谁问。
+    #: 只给一个数字 id 等于没给。姓名可能重名，所以带上学号。
+    created_by_name: str | None = None
+    created_by_student_id: str | None = None
     created_at: datetime
     is_usable: bool
 

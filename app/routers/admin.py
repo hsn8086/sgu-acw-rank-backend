@@ -47,12 +47,28 @@ router = APIRouter(
 def list_invites(
     include_dead: bool = Query(default=True, description="是否包含已失效的邀请码"),
     db: Session = Depends(get_session),
-) -> list[Invite]:
+) -> list[InvitePublic]:
     statement = select(Invite).order_by(Invite.created_at.desc())  # type: ignore[attr-defined]
     rows = list(db.exec(statement).all())
     if not include_dead:
         rows = [row for row in rows if row.is_usable]
-    return rows
+
+    # 一次查出所有创建者，而不是每个邀请码查一次。
+    creator_ids = {row.created_by for row in rows if row.created_by is not None}
+    creators: dict[int, User] = {}
+    if creator_ids:
+        found = db.exec(select(User).where(User.id.in_(creator_ids))).all()  # type: ignore[attr-defined]
+        creators = {user.id: user for user in found}
+
+    out: list[InvitePublic] = []
+    for row in rows:
+        item = InvitePublic.model_validate(row)
+        creator = creators.get(row.created_by) if row.created_by else None
+        if creator is not None:
+            item.created_by_name = creator.display_name
+            item.created_by_student_id = creator.student_id
+        out.append(item)
+    return out
 
 
 @router.post("/invites", response_model=InvitePublic, status_code=status.HTTP_201_CREATED)
@@ -63,13 +79,11 @@ def create_invite(
 ) -> Invite:
     """Mint an invite code.
 
-    Only root may hand out administrative invites; an admin issuing an admin
-    code would be privilege escalation by proxy.
+    管理员之间是平级的：任何管理员都能发管理员邀请码。root 是唯一的例外，
+    不能通过邀请码授予——root 只有一个，要转让得走别的路。
     """
     if payload.grants_role == Role.ROOT:
         raise HTTPException(status_code=403, detail="不能通过邀请码授予 root")
-    if payload.grants_role == Role.ADMIN and not admin.is_root:
-        raise HTTPException(status_code=403, detail="只有 root 可以创建管理员邀请码")
 
     # Retry on the vanishingly unlikely collision rather than trusting luck.
     for _ in range(5):
@@ -92,7 +106,13 @@ def create_invite(
     db.add(invite)
     db.commit()
     db.refresh(invite)
-    return invite
+
+    # 建完立刻返回，前端要直接插进列表里。创建者信息一并带上，否则新出现的
+    # 那一行跟其他行长得不一样，得刷新才有。
+    item = InvitePublic.model_validate(invite)
+    item.created_by_name = admin.display_name
+    item.created_by_student_id = admin.student_id
+    return item
 
 
 @router.delete("/invites/{invite_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -206,12 +226,10 @@ def create_user(
 ) -> User:
     """管理员直接建号，不用邀请码。
 
-    权限规则与邀请码一致：不能造 root，只有 root 能造管理员。
+    权限规则与邀请码一致：不能造 root，管理员之间平级。
     """
     if payload.role == Role.ROOT:
         raise HTTPException(status_code=403, detail="不能直接创建 root 账号")
-    if payload.role == Role.ADMIN and not admin.is_root:
-        raise HTTPException(status_code=403, detail="只有 root 可以创建管理员")
 
     try:
         parsed = parse_student_id(payload.student_id)
@@ -274,8 +292,7 @@ def update_user(
             raise HTTPException(status_code=403, detail="不能修改 root 的角色")
         if payload.role == Role.ROOT and not admin.is_root:
             raise HTTPException(status_code=403, detail="只有 root 可以授予 root")
-        if payload.role == Role.ADMIN and not admin.is_root:
-            raise HTTPException(status_code=403, detail="只有 root 可以授予管理员")
+        # 管理员之间平级：任何管理员都能授予或撤销管理员。
         user.role = payload.role
 
     if payload.status is not None and payload.status != user.status:
@@ -323,8 +340,7 @@ def delete_user(
         raise HTTPException(status_code=400, detail="不能删除自己")
     if user.is_root:
         raise HTTPException(status_code=403, detail="不能删除 root 账号")
-    if user.role == Role.ADMIN and not admin.is_root:
-        raise HTTPException(status_code=403, detail="只有 root 可以删除管理员")
+    # 管理员之间平级，所以能互相删除。
 
     # 会话、账号、以及指向该成员的其他记录都要一起清掉。漏掉任何一张带
     # 外键的表，删除都会被数据库拦下。

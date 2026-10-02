@@ -1211,3 +1211,134 @@ def test_rating_board_shows_college_and_class(client, root_client):
     assert entry["college_name"] == "信息工程学院"
     assert entry["major_name"] == "软件工程"
     assert entry["class_label"] == "软件工程 3 班"
+
+
+# --------------------------------------------------------------------------- #
+# 管理员之间的权限
+# --------------------------------------------------------------------------- #
+
+
+def _make_admin(client, root_client, student_id="25125023010") -> TestClient:
+    """建一个管理员，并返回以他身份登录的客户端。
+
+    管理员之间是平级的，所以测试要站在管理员的身份上，而不是 root。
+    """
+    from app.main import create_app
+
+    invite = _make_invite(root_client, grants_role="admin")
+    _register(client, invite["code"], student_id=student_id)
+
+    admin = TestClient(create_app())
+    response = admin.post(
+        "/api/auth/login",
+        json={"student_id": student_id, "password": MEMBER_PASSWORD},
+    )
+    assert response.status_code == 200, response.text
+    return admin
+
+
+def test_admin_can_create_admin_invite(client, root_client):
+    """管理员之间平级，所以管理员也能发管理员邀请码。
+
+    原先只有 root 能发。但工作坊里 root 常常不在线，加个管理员要等很久。
+    """
+    admin = _make_admin(client, root_client)
+
+    response = admin.post(
+        "/api/admin/invites",
+        json={"max_uses": 1, "ttl_hours": 24, "grants_role": "admin", "note": ""},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["grants_role"] == "admin"
+
+
+def test_admin_cannot_create_root_invite(client, root_client):
+    """root 不能靠邀请码授予。root 只有一个，转让得走别的路。"""
+    admin = _make_admin(client, root_client)
+
+    response = admin.post(
+        "/api/admin/invites",
+        json={"max_uses": 1, "ttl_hours": 24, "grants_role": "root", "note": ""},
+    )
+    assert response.status_code == 403
+
+
+def test_admin_can_promote_member(client, root_client):
+    """管理员能把成员提成管理员。"""
+    invite = _make_invite(root_client)
+    _register(client, invite["code"], student_id="25125023011")
+
+    admin = _make_admin(client, root_client)
+    target = next(u for u in _members(admin) if u["student_id"] == "25125023011")
+
+    response = admin.patch(f"/api/admin/users/{target['id']}", json={"role": "admin"})
+    assert response.status_code == 200, response.text
+    assert response.json()["role"] == "admin"
+
+
+def test_admin_can_demote_another_admin(client, root_client):
+    """管理员也能撤销别的管理员。
+
+    既然能任命，就该能撤销——只能加不能减，出事时收不回来。
+    """
+    _make_admin(client, root_client, student_id="25125023012")
+    admin = _make_admin(client, root_client, student_id="25125023013")
+
+    target = next(u for u in _members(admin) if u["student_id"] == "25125023012")
+    response = admin.patch(f"/api/admin/users/{target['id']}", json={"role": "member"})
+    assert response.status_code == 200, response.text
+    assert response.json()["role"] == "member"
+
+
+def test_admin_can_delete_another_admin(client, root_client):
+    """管理员之间能互相删除。"""
+    _make_admin(client, root_client, student_id="25125023014")
+    admin = _make_admin(client, root_client, student_id="25125023015")
+
+    target = next(u for u in _members(admin) if u["student_id"] == "25125023014")
+    response = admin.delete(f"/api/admin/users/{target['id']}")
+    assert response.status_code == 204, response.text
+
+
+def test_nobody_can_touch_root(client, root_client):
+    """root 仍然动不了。上面放开的都只是管理员之间。"""
+    admin = _make_admin(client, root_client)
+    root_user = next(u for u in _members(admin) if u["role"] == "root")
+
+    root_id = root_user["id"]
+    url = f"/api/admin/users/{root_id}"
+
+    assert admin.patch(url, json={"role": "member"}).status_code == 403
+    assert admin.patch(url, json={"status": "disabled"}).status_code == 403
+    assert admin.delete(url).status_code == 403
+
+
+# --------------------------------------------------------------------------- #
+# 邀请码的创建者
+# --------------------------------------------------------------------------- #
+
+
+def test_invite_shows_who_created_it(client, root_client):
+    """邀请码要写清是谁创建的。
+
+    码被转发出去、或者发错了人，得知道找谁问。只给一个数字 id 等于没给。
+    姓名可能重名，所以带上学号。
+    """
+    invite = _make_invite(root_client)
+
+    assert invite["created_by_name"] == "root"
+    assert invite["created_by_student_id"] == ROOT_STUDENT_ID
+
+    listed = root_client.get("/api/admin/invites").json()
+    row = next(i for i in listed if i["code"] == invite["code"])
+    assert row["created_by_name"] == "root"
+    assert row["created_by_student_id"] == ROOT_STUDENT_ID
+
+
+def test_invite_creator_is_the_admin_who_made_it(client, root_client):
+    """管理员发的码，创建者要显示这个管理员，不是 root。"""
+    admin = _make_admin(client, root_client, student_id="25125023016")
+    invite = _make_invite(admin)
+
+    assert invite["created_by_name"] == "测试成员"
+    assert invite["created_by_student_id"] == "25125023016"
