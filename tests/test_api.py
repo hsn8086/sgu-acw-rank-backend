@@ -477,3 +477,41 @@ def test_luogu_falls_back_to_name_when_uid_not_found():
     assert profile.identifier == "2302227"
     assert profile.display_name == "zjwpg666"
     assert any("/user/search" in url for url in calls), "应该试过按名字搜"
+
+
+# --------------------------------------------------------------------------- #
+# 历史综合窗口
+# --------------------------------------------------------------------------- #
+
+
+def test_history_window_starts_at_2024_spring():
+    """历史综合从 2024 春季学期开头算起。
+
+    取 2 月 1 日而不是 1 月 1 日：前端按学期分桶，而 1 月属于上一年的秋季
+    学期。从 1 月开始会切出一个只有 31 天的「2023 秋」，那个桶的数据必然
+    偏少，看起来像那学期没人练。
+
+    也不用「最近 N 天」：社团的记录从 2024 级才开始，按天数拉会带出一段
+    没有意义的空白期。
+    """
+    from app.routers.practice import HISTORY_START, _recent_dates
+
+    assert HISTORY_START == "2024-02-01"
+
+    dates = _recent_dates(0)
+    assert dates[0] == "2024-02-01"
+    # 从起点到今天是连续的，中间不缺天
+    from datetime import date, timedelta
+
+    start = date.fromisoformat(dates[0])
+    assert dates[-1] == dates[0] if len(dates) == 1 else True
+    assert date.fromisoformat(dates[-1]) - start == timedelta(days=len(dates) - 1)
+
+
+def test_recent_dates_still_works_for_day_counts():
+    """普通窗口不受影响。"""
+    from app.routers.practice import _recent_dates
+
+    assert len(_recent_dates(1)) == 1
+    assert len(_recent_dates(7)) == 7
+    assert len(_recent_dates(90)) == 90

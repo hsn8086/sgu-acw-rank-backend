@@ -50,13 +50,35 @@ router = APIRouter(
 )
 
 
+#: 「历史综合」窗口的起点。
+#:
+#: 不是「最近 N 天」——社团的记录从 2024 级开始，再往前是空白的，按天数算
+#: 会拉出一段没有意义的空白期。
+#:
+#: 取 2 月 1 日而不是 1 月 1 日：前端按学期分桶，而 1 月属于上一年的秋季
+#: 学期。从 1 月开始会切出一个只有 31 天的「2023 秋」，那个桶的数据必然
+#: 偏少，看起来像那学期没人练。从春季学期开头算起，每个桶都是完整的。
+HISTORY_START = "2024-02-01"
+
+
 def _recent_dates(days: int) -> list[str]:
     """最近 ``days`` 个练习日（含今天），从早到晚。
 
     练习日的定义在 app/sync.py：以东八区凌晨 4 点为界，所以凌晨 0 到 3 点
     访问时，「今天」仍然是昨天那个练习日。
+
+    ``days`` 传 ``0`` 表示「历史综合」：从 :data:`HISTORY_START` 到今天，
+    有多少天就多少天。
     """
     today = date.fromisoformat(current_practice_day())
+
+    if days <= 0:
+        start = date.fromisoformat(HISTORY_START)
+        span = (today - start).days
+        if span < 0:
+            return [today.strftime("%Y-%m-%d")]
+        return [(start + timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(span + 1)]
+
     return [
         (today - timedelta(days=offset)).strftime("%Y-%m-%d") for offset in range(days - 1, -1, -1)
     ]
@@ -201,7 +223,7 @@ def build_practice_rank(
 def practice_rank(
     _current: User = Depends(get_current_user),
     db: Session = Depends(get_session),
-    days: int = Query(default=7, ge=1, le=3650, description="统计最近多少天"),
+    days: int = Query(default=7, ge=0, le=3650, description="统计最近多少天；0 表示历史综合"),
     platform: str | None = Query(default=None, description="只统计某个平台"),
     include_retired: bool = Query(default=False),
     college: str | None = Query(default=None, description="只看某个学院（学院名）"),
