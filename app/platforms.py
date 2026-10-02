@@ -255,6 +255,17 @@ def resolve_luogu_uid(client: httpx.Client, name: str) -> tuple[str, str] | None
     return None
 
 
+def _luogu_user(client: httpx.Client, identifier: str) -> tuple[dict, dict]:
+    """读洛谷用户页，返回 ``(user, data)``。读不到时 user 是空 dict。
+
+    两个都返回是因为 rating 不在 user 里，而在同一层的 elo 字段里。
+    """
+    page = _luogu_get(client, f"https://www.luogu.com.cn/user/{identifier}")
+    data = _luogu_context(page).get("data") or {}
+    user = data.get("user")
+    return (user if isinstance(user, dict) else {}), data
+
+
 def fetch_luogu(client: httpx.Client, identifier: str) -> Profile:
     """``identifier`` 可以是数字 uid，也可以是用户名。"""
     if not identifier.isdigit():
@@ -263,10 +274,19 @@ def fetch_luogu(client: httpx.Client, identifier: str) -> Profile:
             raise FetchError("洛谷上没有这个用户", not_found=True)
         identifier = found[0]
 
-    page = _luogu_get(client, f"https://www.luogu.com.cn/user/{identifier}")
-    context = _luogu_context(page)
-    data = context.get("data") or {}
-    user = data.get("user") or {}
+    user, data = _luogu_user(client, identifier)
+
+    if not user and identifier.isdigit():
+        # 数字 uid 查不到。可能是把用户名当成了 uid（比如昵称恰好全是数字），
+        # 也可能就是写错了。再当用户名搜一次，搜到就用。
+        #
+        # 不做这一步的话，成员看到的是「洛谷上没有这个用户」，而他明明有
+        # 账号——只是填的是昵称。
+        found = resolve_luogu_uid(client, identifier)
+        if found is not None:
+            identifier = found[0]
+            user, data = _luogu_user(client, identifier)
+
     if not user:
         raise FetchError("洛谷上没有这个用户", not_found=True)
 
@@ -298,10 +318,51 @@ def fetch_luogu(client: httpx.Client, identifier: str) -> Profile:
 # --------------------------------------------------------------------------- #
 
 
+def resolve_nowcoder_uid(client: httpx.Client, name: str) -> str | None:
+    """按昵称搜出牛客 uid。搜不到返回 None。
+
+    牛客的资料页只认数字 uid，成员却常常记得自己的昵称。搜索页是服务端
+    直出的，结果里带着 ``/users/{uid}`` 的链接。
+
+    搜到多个时取第一个——牛客的排序把最匹配的放前面。这不是万无一失，
+    但比「直接报错说必须填数字」有用得多：拿错 uid 之后验证那一步会失败，
+    成员会看到「签名里找不到验证码」，那时他就知道自己填错了。
+    """
+    page = client.get(
+        "https://www.nowcoder.com/search/user",
+        params={"query": name},
+    )
+    if page.status_code != 200:
+        return None
+
+    # 卡片结构是：href="/users/{uid}" ... <span class="nickname">昵称</span>
+    #
+    # 必须要求昵称完全相等。搜索是模糊匹配，「不存在的名字xyz」会匹配到
+    # 「响亮的名字xyz」——把别人绑上来比报错更糟。
+    for card in re.finditer(
+        r'href="/users/(\d+)"[^>]*>(.{0,2000}?)</a>',
+        page.text,
+        re.S,
+    ):
+        uid, block = card.group(1), card.group(2)
+        nick = re.search(r'class="nickname"[^>]*>([^<]+)<', block)
+        if nick and html.unescape(nick.group(1)).strip() == name:
+            return uid
+
+    return None
+
+
 def fetch_nowcoder(client: httpx.Client, identifier: str) -> Profile:
-    """``identifier`` 是牛客的 uid。"""
+    """``identifier`` 是牛客的 uid，也接受昵称。"""
     if not identifier.isdigit():
-        raise FetchError("牛客需要填数字 uid")
+        # 成员填了昵称。先搜出 uid 再继续，省得他对着「必须填数字」发愣。
+        resolved = resolve_nowcoder_uid(client, identifier)
+        if resolved is None:
+            raise FetchError(
+                "牛客上没有这个用户，也没搜到这个昵称。请填个人主页地址里的数字 uid。",
+                not_found=True,
+            )
+        identifier = resolved
 
     response = client.get(f"https://ac.nowcoder.com/acm/contest/profile/{identifier}")
     if response.status_code != 200:

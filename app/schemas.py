@@ -621,3 +621,31 @@ class AdminMemberDetail(BaseModel):
     last_practice_date: str | None = None
     #: 有几个账号处于连续失败状态。
     failing_accounts: int = 0
+
+
+class ProblemListRankEntry(BaseModel):
+    """题单完成度排行榜的一行。"""
+
+    user_id: int
+    display_name: str
+    student_id: str
+    enroll_year: int
+    college_name: str | None = None
+    major_name: str | None = None
+    class_label: str | None = None
+
+    done_count: int = 0
+    total: int = 0
+    #: 完成度百分比，0~100。四舍五入到整数。
+    percent: int = 0
+    #: 最后一次过这个题单里的题是哪天。
+    last_done_date: str | None = None
+
+
+class ProblemListRank(BaseModel):
+    """题单完成度排行榜。"""
+
+    list_id: int
+    title: str
+    total: int
+    entries: list[ProblemListRankEntry] = Field(default_factory=list)

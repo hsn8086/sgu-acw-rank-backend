@@ -134,15 +134,21 @@ class User(SQLModel, table=True):
 
     @property
     def class_label(self) -> str | None:
-        """班级，如「软件工程 3 班」。
+        """班级简称，如「信工软工 3 班」。
 
-        单独一个「3 班」没有意义——得知道是哪个专业的 3 班。所以这里是专业
-        加序号拼出来的，而不是只返回序号。
+        单独一个「3 班」没有意义——得知道是哪个专业的 3 班。
+
+        用简称而不是全名：全名拼出来是「信息工程学院 · 软件工程 ·
+        软件工程 3 班」，一行放不下，窄屏更是一团。「信工软工 3 班」
+        一眼能读完。
         """
         if not self.class_no:
             return None
-        major = self.major_name
-        return f"{major} {self.class_no} 班" if major else f"{self.class_no} 班"
+
+        from .academic import short_college, short_major
+
+        prefix = f"{short_college(self.college_name)}{short_major(self.major_name)}"
+        return f"{prefix} {self.class_no} 班" if prefix else f"{self.class_no} 班"
 
     @property
     def is_active(self) -> bool:

@@ -109,8 +109,14 @@ def _mark_solved(user_id: int, platform: str, keys: list[str]) -> None:
             select(Account).where(Account.user_id == user_id, Account.platform == platform)
         ).first()
         if account is None:
+            # verified_at 必须设：完成度排行只列有绑定账号的人，
+            # 没验证的账号不算「绑了号」。
             account = Account(
-                user_id=user_id, platform=platform, identifier="tester", created_at=utcnow()
+                user_id=user_id,
+                platform=platform,
+                identifier="tester",
+                verified_at=utcnow(),
+                created_at=utcnow(),
             )
             db.add(account)
             db.commit()
@@ -434,3 +440,69 @@ def test_include_nested_returns_collection_children(root_client):
     everything = root_client.get("/api/problem-lists?include_nested=true").json()
     assert child["id"] in {row["id"] for row in everything}
     assert collection["id"] in {row["id"] for row in everything}
+
+
+# --------------------------------------------------------------------------- #
+# 完成度排行榜
+# --------------------------------------------------------------------------- #
+
+
+def test_completion_rank_orders_by_done_count(root_client, member_client):
+    """完成度排行榜按过了多少题排序。"""
+    lst = _make_list(root_client, "入门五题")
+    for key in ["4A", "71A", "158A", "1A", "231A"]:
+        _add_problem(root_client, lst["id"], key=key)
+
+    members = root_client.get("/api/admin/users").json()["items"]
+    member = next(u for u in members if u["student_id"] == MEMBER_STUDENT_ID)
+    _mark_solved(member["id"], "codeforces", ["4A", "71A", "158A"])
+
+    board = root_client.get(f"/api/problem-lists/{lst['id']}/rank").json()
+    assert board["total"] == 5
+    assert len(board["entries"]) == 1
+
+    entry = board["entries"][0]
+    assert entry["done_count"] == 3
+    assert entry["percent"] == 60
+    assert entry["class_label"] == "信工软工 3 班"
+
+
+def test_completion_rank_only_lists_members_with_accounts(root_client):
+    """没绑账号的人不进榜。
+
+    他们完成度恒为 0，列进来会淹没真正在练的人，也会让人以为「大家都没开始」。
+    """
+    from app.main import create_app
+
+    invite = root_client.post(
+        "/api/admin/invites",
+        json={"max_uses": 1, "ttl_hours": 24, "grants_role": "member", "note": ""},
+    ).json()
+    TestClient(create_app()).post(
+        "/api/auth/register",
+        json={
+            "invite_code": invite["code"],
+            "student_id": "25125023030",
+            "display_name": "没绑号的",
+            "password": MEMBER_PASSWORD,
+        },
+    )
+
+    lst = _make_list(root_client, "只有绑号的人")
+    _add_problem(root_client, lst["id"], key="4A")
+
+    board = root_client.get(f"/api/problem-lists/{lst['id']}/rank").json()
+    names = {e["display_name"] for e in board["entries"]}
+    assert "没绑号的" not in names
+
+
+def test_completion_rank_of_empty_list(root_client):
+    """空题单不报错，返回空榜。"""
+    lst = _make_list(root_client, "空题单")
+    board = root_client.get(f"/api/problem-lists/{lst['id']}/rank").json()
+    assert board["total"] == 0
+    assert board["entries"] == []
+
+
+def test_completion_rank_of_missing_list(root_client):
+    assert root_client.get("/api/problem-lists/99999/rank").status_code == 404

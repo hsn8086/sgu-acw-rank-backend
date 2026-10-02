@@ -201,7 +201,7 @@ def build_practice_rank(
 def practice_rank(
     _current: User = Depends(get_current_user),
     db: Session = Depends(get_session),
-    days: int = Query(default=7, ge=1, le=90, description="统计最近多少天"),
+    days: int = Query(default=7, ge=1, le=3650, description="统计最近多少天"),
     platform: str | None = Query(default=None, description="只统计某个平台"),
     include_retired: bool = Query(default=False),
     college: str | None = Query(default=None, description="只看某个学院（学院名）"),

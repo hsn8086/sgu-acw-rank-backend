@@ -368,3 +368,112 @@ def test_nowcoder_problem_key_accepts_legacy_format():
 
     info = fetch_nowcoder_problem(None, "nowcoder:A+B Problem")
     assert info.name == "A+B Problem"
+
+
+# --------------------------------------------------------------------------- #
+# 按昵称解析 uid
+# --------------------------------------------------------------------------- #
+
+
+def _nowcoder_search_page(entries: list[tuple[str, str]]) -> str:
+    """拼一个牛客搜索页的片段。"""
+    cards = "".join(
+        f'<a href="/users/{uid}" class="user-card">'
+        f'<div class="user-text-info"><span class="nickname">{nick}</span></div></a>'
+        for uid, nick in entries
+    )
+    return f"<html><body><div class='user-card-list'>{cards}</div></body></html>"
+
+
+def test_nowcoder_resolves_nickname_to_uid():
+    """牛客资料页只认数字 uid，但成员常常记得昵称。
+
+    这是「笨蛋输入成名称了」的场景：直接报「需要填数字 uid」等于没说，
+    成员不知道去哪找 uid。搜出来替他填上。
+    """
+    from app.platforms import fetch_nowcoder
+
+    class SearchResponse:
+        status_code = 200
+        text = _nowcoder_search_page([("182135517", "i少白")])
+
+    class ProfileResponse:
+        status_code = 200
+        text = '<div class="coder-brief">SGU-abc</div><a data-receiver-name="i少白"></a>'
+
+    class FakeClient:
+        def get(self, url, **kwargs):
+            if "/search/user" in url:
+                return SearchResponse()
+            return ProfileResponse()
+
+    profile = fetch_nowcoder(FakeClient(), "i少白")
+    assert profile.identifier == "182135517"
+    assert profile.display_name == "i少白"
+
+
+def test_nowcoder_rejects_fuzzy_match():
+    """搜不到就报错，不能模糊匹配到别人。
+
+    牛客的搜索是模糊的：「不存在的名字xyz」会匹配到「响亮的名字xyz」。
+    把别人绑上来比报错更糟——那个人会莫名其妙多出一个账号。
+    """
+    from app.platforms import FetchError, fetch_nowcoder
+
+    class FakeResponse:
+        status_code = 200
+        text = _nowcoder_search_page([("372537260", "响亮的名字xyz")])
+
+    class FakeClient:
+        def get(self, url, **kwargs):
+            if "/search/user" in url:
+                return FakeResponse()
+            raise AssertionError(f"不该请求 {url}")
+
+    with pytest.raises(FetchError) as exc:
+        fetch_nowcoder(FakeClient(), "不存在的名字xyz")
+    assert "没有这个用户" in str(exc.value)
+
+
+def test_luogu_falls_back_to_name_when_uid_not_found():
+    """数字 uid 查不到时，再当用户名搜一次。
+
+    场景是昵称恰好全是数字，成员以为那是 uid。不做这一步的话，他看到的是
+    「洛谷上没有这个用户」，而他明明有账号。
+    """
+    from app.platforms import fetch_luogu
+
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+        text = (
+            '<script id="lentille-context" type="application/json">'
+            '{"data": {"user": {"uid": 2302227, "name": "zjwpg666", "slogan": "SGU-abc"}}}'
+            "</script>"
+        )
+
+    class FakeClient:
+        def get(self, url, **kwargs):
+            calls.append(url)
+            if "/user/search" in url:
+                # 搜索接口返回 JSON，不是 HTML
+                class SearchResponse:
+                    status_code = 200
+                    text = '{"users": [{"uid": 2302227, "name": "123456"}]}'
+
+                return SearchResponse()
+            if "/user/2302227" in url:
+                return FakeResponse()
+
+            # 第一次按 uid 查，页面里没有 user 对象
+            class EmptyResponse:
+                status_code = 200
+                text = '<script id="lentille-context" type="application/json">{"data": {}}</script>'
+
+            return EmptyResponse()
+
+    profile = fetch_luogu(FakeClient(), "123456")
+    assert profile.identifier == "2302227"
+    assert profile.display_name == "zjwpg666"
+    assert any("/user/search" in url for url in calls), "应该试过按名字搜"

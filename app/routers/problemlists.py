@@ -29,6 +29,7 @@ from ..models import (
 from ..problemlists import (
     MAX_PROBLEMS_PER_LIST,
     cached_problems,
+    completion_rank,
     detail,
     summarize,
 )
@@ -40,6 +41,7 @@ from ..schemas import (
     ProblemListCreate,
     ProblemListDetail,
     ProblemListPublic,
+    ProblemListRank,
     ProblemListUpdate,
     ProblemLookup,
     ReorderRequest,
@@ -93,6 +95,30 @@ def list_lists(
 
     done_set = solved_keys(db, viewer.id) if viewer is not None else None
     return [summarize(db, row, done_set=done_set) for row in rows]
+
+
+@router.get("/{list_id}/rank", response_model=ProblemListRank)
+def list_completion_rank(
+    list_id: int,
+    _viewer: User | None = Depends(get_optional_user),
+    db: Session = Depends(get_session),
+) -> ProblemListRank:
+    """题单完成度排行榜。
+
+    公开可看：谁做了多少不是隐私——练习量榜本来就是公开的。未登录也能看，
+    只是不能看自己那一行的高亮（前端处理）。
+    """
+    problem_list = db.get(ProblemList, list_id)
+    if problem_list is None:
+        raise HTTPException(status_code=404, detail="题单不存在")
+
+    entries = completion_rank(db, problem_list)
+    return ProblemListRank(
+        list_id=list_id,
+        title=problem_list.title,
+        total=entries[0].total if entries else 0,
+        entries=entries,
+    )
 
 
 @router.get("/{list_id}", response_model=ProblemListDetail)

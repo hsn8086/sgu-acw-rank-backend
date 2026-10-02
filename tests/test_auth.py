@@ -1172,7 +1172,7 @@ def test_class_is_parsed_and_exposed(client, root_client):
     created = _register(client, invite["code"], student_id="25125023003").json()
 
     assert created["class_no"] == 3
-    assert created["class_label"] == "软件工程 3 班"
+    assert created["class_label"] == "信工软工 3 班"
 
 
 def test_rating_board_shows_college_and_class(client, root_client):
@@ -1210,7 +1210,7 @@ def test_rating_board_shows_college_and_class(client, root_client):
     entry = board["entries"][0]
     assert entry["college_name"] == "信息工程学院"
     assert entry["major_name"] == "软件工程"
-    assert entry["class_label"] == "软件工程 3 班"
+    assert entry["class_label"] == "信工软工 3 班"
 
 
 # --------------------------------------------------------------------------- #
