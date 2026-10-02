@@ -28,6 +28,7 @@ AtCoder       Affiliation         用户页 HTML           否
 from __future__ import annotations
 
 import html
+import logging
 import re
 import secrets
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from .models import Platform
+
+logger = logging.getLogger("sgu_acw.platforms")
 
 #: 统计口径按东八区。牛客页面上的时间没有时区标记，本身就是北京时间。
 CST = timezone(timedelta(hours=8))
@@ -496,18 +499,35 @@ def fetch_solved_nowcoder(client: httpx.Client, identifier: str) -> SolvedSet:
     problems: dict[str, int] = {}
 
     # 竞赛站。抓不到不该让整个同步失败——主站那部分往往还有数据。
+    contest_error: FetchError | None = None
     try:
         problems.update(_nowcoder_contest_solved(client, identifier))
-    except FetchError:
-        if not problems:
-            raise
+    except FetchError as exc:
+        contest_error = exc
 
     # 主站。同样，失败时保留竞赛站已经拿到的。
+    main_error: FetchError | None = None
     try:
         problems.update(_nowcoder_main_solved(client, identifier))
-    except FetchError:
-        if not problems:
-            raise
+    except FetchError as exc:
+        main_error = exc
+
+    if not problems:
+        # 两边都失败。报第一个错就行，第二个多半是同一个原因。
+        raise contest_error or main_error or FetchError("牛客没有返回任何数据")
+
+    # 一边成功一边失败是常见情况（限流、平台改版）。这时候**必须留痕**：
+    # 早先静默吞掉，结果快照里少了一半数据而没有任何提示，很难查。
+    if contest_error or main_error:
+        failed = "竞赛站" if contest_error else "主站"
+        detail = contest_error or main_error
+        logger.warning(
+            "牛客 %s 抓取失败（%s），本次只统计到 %d 题：%s",
+            failed,
+            identifier,
+            len(problems),
+            detail,
+        )
 
     return SolvedSet(platform=Platform.NOWCODER, identifier=identifier, problems=problems)
 
@@ -583,10 +603,23 @@ def _nowcoder_main_solved(client: httpx.Client, identifier: str) -> dict[str, in
                 raise FetchError(f"牛客主站返回 {response.status_code}")
             break
 
+        # 302 要跟着走。外层 client 是 follow_redirects=False（绑定校验时
+        # 需要看到 302 才能判断），但主站这个接口会先回一次跳转，
+        # 不跟的话拿到的是空 body，json() 直接抛异常。
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get("location")
+            if not location:
+                raise FetchError("牛客主站返回了跳转但没给目标地址")
+            response = client.get(location)
+            if response.status_code != 200:
+                raise FetchError(f"牛客主站跳转后返回 {response.status_code}")
+
         try:
             payload = response.json()
         except Exception as exc:  # noqa: BLE001
-            raise FetchError("牛客主站返回了无法解析的内容") from exc
+            raise FetchError(
+                f"牛客主站返回了无法解析的内容（HTTP {response.status_code}）"
+            ) from exc
 
         if not payload.get("success"):
             if page == 1:
