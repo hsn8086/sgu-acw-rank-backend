@@ -44,6 +44,17 @@ class UserStatus:
     DISABLED = "disabled"
 
 
+class ProblemListKind:
+    """题单的两种形态。"""
+
+    #: 题单的集合，里面放别的题单。
+    COLLECTION = "collection"
+    #: 题目清单。
+    LIST = "list"
+
+    ALL = (COLLECTION, LIST)
+
+
 class Platform:
     """Supported competitive-programming platforms."""
 
@@ -450,3 +461,107 @@ class SyncRun(SQLModel, table=True):
     @property
     def is_running(self) -> bool:
         return self.finished_at is None
+
+
+# --------------------------------------------------------------------------- #
+# 题单
+# --------------------------------------------------------------------------- #
+
+
+class ProblemCache(SQLModel, table=True):
+    """题目元信息的缓存。
+
+    题单里要显示题目名称、难度、标签，这些都得问平台。CF 一次能拉全量
+    （一万多题，一个请求），洛谷和牛客得逐题问。
+
+    所以缓存下来：CF 全量拉一次；其他平台在第一次遇到某题时抓一次，之后
+    直接读。题目的名字和难度基本不会变，缓存没有过期时间。
+
+    主键是「平台 + 题号」。题号用平台原生的写法：CF 是 ``1234A``，洛谷是
+    ``P1001``，AtCoder 是 ``abc300_a``，牛客是 ``nowcoder:题目名``。
+    """
+
+    __tablename__ = "problem_cache"
+
+    id: int | None = Field(default=None, primary_key=True)
+    platform: str = Field(max_length=16, index=True)
+    #: 平台原生题号。
+    key: str = Field(max_length=128, index=True)
+
+    name: str = Field(default="", max_length=300)
+    #: 难度。CF 是 rating（800~3500），洛谷是 1~7 的等级，没有则为空。
+    rating: int | None = None
+    #: 标签，JSON 数组。各平台的标签体系不一样，直接存原文。
+    tags_json: str = Field(default="[]")
+    #: 题面链接。有些平台光靠题号拼不出链接，所以存下来。
+    url: str = Field(default="", max_length=500)
+
+    #: 抓不到信息时记下原因，前端显示成「信息缺失」而不是空着。
+    missing_reason: str = Field(default="", max_length=200)
+    fetched_at: datetime = Field(default_factory=utcnow)
+
+
+class ProblemList(SQLModel, table=True):
+    """题单，或者题单合集。
+
+    两种东西共用一张表，用 ``kind`` 区分：
+
+    - ``collection``：题单的集合，里面放的是别的题单。
+    - ``list``：题目清单，里面放的是题目。
+
+    分成两张表的话，查询和排序都要写两遍，而它们的字段几乎一样。用 kind
+    区分更省事，代价是要在写入时保证层级正确（合集只能装题单，题单只能
+    装题目），这个约束在接口层校验。
+
+    只允许两层，合集里不能再放合集——嵌套会让完成度计算和界面都复杂很多，
+    而实际用起来两层就够了。
+    """
+
+    __tablename__ = "problem_lists"
+
+    id: int | None = Field(default=None, primary_key=True)
+    kind: str = Field(default=ProblemListKind.LIST, max_length=16, index=True)
+
+    title: str = Field(max_length=200)
+    description: str = Field(default="", max_length=2000)
+
+    #: 所属合集。只有 kind=list 时才有值。
+    collection_id: int | None = Field(default=None, foreign_key="problem_lists.id", index=True)
+
+    #: 排序用。小的排前面，手动拖拽时改这个值。
+    position: int = Field(default=0, index=True)
+
+    #: 只有管理员可见的内部说明。
+    admin_note: str = Field(default="", max_length=500)
+
+    created_by: int | None = Field(default=None, foreign_key="users.id")
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+    @property
+    def is_collection(self) -> bool:
+        return self.kind == ProblemListKind.COLLECTION
+
+
+class ProblemListItem(SQLModel, table=True):
+    """题单里的一道题。
+
+    题号存平台原生写法，与 ``solved_snapshots`` 里的标识一致，这样判断
+    「这个人过了没有」就是一次集合查找，不用做任何格式转换。
+    """
+
+    __tablename__ = "problem_list_items"
+
+    id: int | None = Field(default=None, primary_key=True)
+    list_id: int = Field(foreign_key="problem_lists.id", index=True)
+
+    platform: str = Field(max_length=16)
+    key: str = Field(max_length=128)
+
+    #: 手动排序用。
+    position: int = Field(default=0, index=True)
+
+    #: 出题人想加的话可以写点提示。
+    note: str = Field(default="", max_length=500)
+
+    created_at: datetime = Field(default_factory=utcnow)

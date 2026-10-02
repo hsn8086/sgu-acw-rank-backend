@@ -21,7 +21,7 @@ from .config import get_settings
 from .db import get_engine, init_db
 from .deps import require_origin_secret
 from .models import Role, User, utcnow
-from .routers import accounts, admin, auth, meta, practice, users
+from .routers import accounts, admin, auth, meta, practice, problemlists, users
 from .security import hash_password
 from .student_id import ROOT_STUDENT_ID, StudentIdError, is_root_student_id, parse_student_id
 
@@ -126,6 +126,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router, prefix=API_PREFIX)
     app.include_router(accounts.router, prefix=API_PREFIX)
     app.include_router(practice.router, prefix=API_PREFIX)
+    app.include_router(problemlists.router, prefix=API_PREFIX)
     app.include_router(admin.router, prefix=API_PREFIX)
 
     @app.exception_handler(StarletteHTTPException)

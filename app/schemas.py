@@ -11,7 +11,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .models import Role
+from .models import Platform, ProblemListKind, Role
 
 
 class UserPublic(BaseModel):
@@ -428,3 +428,118 @@ class AcademicOptions(BaseModel):
     colleges: list[str]
     #: 学院名 → 该学院下的专业名（去重排序）。
     majors: dict[str, list[str]]
+
+
+# --------------------------------------------------------------------------- #
+# 题单
+# --------------------------------------------------------------------------- #
+
+
+class ProblemEntry(BaseModel):
+    """题单里的一道题，带上题目元信息和某个人的完成状态。"""
+
+    id: int
+    platform: str
+    key: str
+    position: int
+    note: str = ""
+
+    #: 以下来自题目缓存。抓不到时 name 为空，missing_reason 说明原因。
+    name: str = ""
+    rating: int | None = None
+    tags: list[str] = Field(default_factory=list)
+    url: str = ""
+    missing_reason: str = ""
+
+    #: 当前查看的人过了没有。未登录时恒为 None——进度是个人数据。
+    done: bool | None = None
+
+
+class ProblemListPublic(BaseModel):
+    """题单或题单合集，看列表时用。"""
+
+    id: int
+    kind: str
+    title: str
+    description: str
+    collection_id: int | None
+    position: int
+    created_at: datetime
+    updated_at: datetime
+
+    #: 题目数（题单）或子题单数（合集）。
+    item_count: int = 0
+    #: 已完成的题数。合集是它下面所有题单的合计。
+    done_count: int = 0
+    #: 完成度 = done_count / total_problems。合集是总题数。
+    total_problems: int = 0
+
+
+class ProblemListDetail(ProblemListPublic):
+    """题单详情。题单带题目列表，合集带子题单。"""
+
+    problems: list[ProblemEntry] = Field(default_factory=list)
+    children: list[ProblemListPublic] = Field(default_factory=list)
+
+
+class ProblemListCreate(BaseModel):
+    kind: str = Field(default=ProblemListKind.LIST)
+    title: str = Field(min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    collection_id: int | None = None
+    admin_note: str = Field(default="", max_length=500)
+
+    @field_validator("kind")
+    @classmethod
+    def _known_kind(cls, value: str) -> str:
+        if value not in ProblemListKind.ALL:
+            raise ValueError("题单类型只能是 list 或 collection")
+        return value
+
+
+class ProblemListUpdate(BaseModel):
+    """改题单。None 表示不动这个字段。"""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    collection_id: int | None = None
+    admin_note: str | None = Field(default=None, max_length=500)
+    #: 换到别的合集。用 ``set_collection`` 区分「不改」和「移出合集」。
+    set_collection: bool = False
+
+
+class ProblemItemCreate(BaseModel):
+    platform: str
+    key: str = Field(min_length=1, max_length=128)
+    note: str = Field(default="", max_length=500)
+
+    @field_validator("platform")
+    @classmethod
+    def _known_platform(cls, value: str) -> str:
+        if value not in Platform.ALL:
+            raise ValueError("未知的平台")
+        return value
+
+
+class ProblemItemUpdate(BaseModel):
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ReorderRequest(BaseModel):
+    """拖拽排序。给一串 id，按给出的顺序重排。"""
+
+    ids: list[int] = Field(min_length=1)
+
+
+class ProblemLookup(BaseModel):
+    """按题号查题目信息，供管理员加题时预览。"""
+
+    platform: str
+    key: str
+    name: str = ""
+    rating: int | None = None
+    tags: list[str] = Field(default_factory=list)
+    url: str = ""
+    missing_reason: str = ""
+    #: 这个题号在现有缓存里有没有。没有的话前端提示「未收录」。
+    cached: bool = False
