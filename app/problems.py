@@ -92,6 +92,66 @@ class ProblemInfo:
     missing_reason: str = ""
 
 
+def normalize_key(platform: str, key: str) -> str:
+    """把用户填的题号规范成内部统一格式。
+
+    目前只有牛客需要转换。牛客有两条来源，内部 key 带来源前缀
+    （``nowcoder:contest:233234``、``nowcoder:main:{uuid}``），但用户不可能
+    知道这个约定——他们手上只有一串数字。
+
+    数字在牛客上是**竞赛站的题目 id**（``ac.nowcoder.com/acm/problem/233234``），
+    主站的题是 uuid，不是数字。实测纯数字走竞赛站能取到标题，走主站会返回
+    「试题不存在」。所以纯数字一律按竞赛站处理。
+
+    这个函数必须在**写入题单之前**调用。否则题单里存的是裸数字，而过题记录
+    里存的是带前缀的 key，两边对不上——完成度永远算成 0，题名也抓不到。
+    生产库里已经有 45 条这样的历史数据，靠迁移脚本修的。
+    """
+    value = (key or "").strip()
+    if not value:
+        return value
+
+    if platform == Platform.NOWCODER:
+        # 已经带前缀的原样返回。
+        if value.startswith("nowcoder:"):
+            return value
+        # 纯数字 → 竞赛站。主站的题是 uuid，用户不会只填数字。
+        if value.isdigit():
+            return f"nowcoder:contest:{value}"
+        # 带字母的当作主站的 uuid。
+        return f"nowcoder:main:{value}"
+
+    return value
+
+
+def parse_nowcoder_key(key: str) -> tuple[str, str]:
+    """把牛客题号拆成 ``(来源, id)``。来源是 ``contest`` 或 ``main``。
+
+    牛客的题号有三种写法，都指向同一批题：
+
+    * ``nowcoder:contest:233234`` —— 内部标准格式。前缀是为了跟
+      ``nowcoder:main:{uuid}`` 区分开：牛客有两条来源，id 体系不同。
+    * ``contest:233234`` —— 去掉了平台名的写法。
+    * ``233234`` —— 迁移之前存进库的裸数字。
+
+    数字是竞赛站的题目 id（主站的题是 uuid，不是数字），所以裸数字归竞赛站。
+
+    单独抽出来是因为拼链接和抓题目信息都要用。两处各写一份的话很容易走偏——
+    实际上就走过：拼链接那边按 ``split(":", 1)`` 解析，遇到带平台前缀的标准
+    格式会把 ``nowcoder`` 当成来源，两个分支都不匹配，全部落到搜索页兜底。
+    """
+    raw = key[len("nowcoder:") :] if key.startswith("nowcoder:") else key
+
+    if raw.isdigit():
+        return "contest", raw
+
+    source, _, problem_id = raw.partition(":")
+    if not problem_id:
+        # 认不出的格式（比如早期的 ``nowcoder:题名``），当主站题名处理。
+        return "legacy", raw
+    return source, problem_id
+
+
 def problem_url(platform: str, key: str) -> str:
     """按题号拼题面链接。
 
@@ -116,21 +176,24 @@ def problem_url(platform: str, key: str) -> str:
         return f"https://www.luogu.com.cn/problem/{key}"
 
     if platform == Platform.ATCODER:
-        # abc300_a → contests/abc300/tasks/abc300_a
-        match = re.fullmatch(r"([a-z]+\d+)_([a-z]+\d*)", key)
-        if match:
-            return f"https://atcoder.jp/contests/{match.group(1)}/tasks/{key}"
+        # 按最后一个下划线切：前面是比赛名，后面是题号。
+        #
+        # 不能用「字母 + 数字」这种模式去猜比赛名——AtCoder 的比赛名
+        # 千奇百怪：``dp``（没数字）、``typical90``（数字在末尾）、
+        # ``abc001``、``joi2020yo1a`` 都有。原来那个 ``[a-z]+\d+`` 要求
+        # 字母后面紧跟数字，``dp_h`` 这种就匹配不上，落到兜底地址，
+        # 于是抓回来的是竞赛列表页，取不到标题。
+        contest, _, suffix = key.rpartition("_")
+        if contest and suffix:
+            return f"https://atcoder.jp/contests/{contest}/tasks/{key}"
         return "https://atcoder.jp/contests/"
 
     if platform == Platform.NOWCODER:
-        # 牛客的 key 是 ``main:{id}`` 或 ``contest:{id}``，两边的题面路径不同。
-        parts = key.split(":", 1)
-        if len(parts) == 2:
-            source, problem_id = parts
-            if source == "contest":
-                return f"https://ac.nowcoder.com/acm/problem/{problem_id}"
-            if source == "main":
-                return f"https://www.nowcoder.com/questionTerminal/{problem_id}"
+        source, problem_id = parse_nowcoder_key(key)
+        if source == "contest":
+            return f"https://ac.nowcoder.com/acm/problem/{problem_id}"
+        if source == "main":
+            return f"https://www.nowcoder.com/questionTerminal/{problem_id}"
         return "https://www.nowcoder.com/exam/oj"
 
     return ""
@@ -245,8 +308,9 @@ def fetch_atcoder_problem(client: httpx.Client, key: str) -> ProblemInfo:
     match = re.search(r'<span class="h2">([^<]*)', response.text)
     if match:
         title = html.unescape(match.group(1)).strip()
-        # 标题形如「A - Two Choices」，去掉前面的题号。
-        info.name = re.sub(r"^[A-Z]\d?\s*-\s*", "", title).strip()
+        # 标题形如「A - Two Choices」或「001 - Yokan Party」，去掉题号。
+        # 题号可能是字母（A、Ex）或数字（001），后面跟着分隔符。
+        info.name = re.sub(r"^[A-Za-z0-9]{1,3}\s*[-–—]\s*", "", title).strip()
     else:
         info.missing_reason = "页面结构变了，取不到标题"
     return info
@@ -269,18 +333,16 @@ def fetch_nowcoder_problem(client: httpx.Client, key: str) -> ProblemInfo:
 
     抓不到名字不算错——题单里显示题号也是可用的，只是不够好看。
     """
-    parts = key.split(":", 2)
-    if len(parts) != 3:
-        # 老的 ``nowcoder:题名`` 格式，生产库里可能还有。
-        name = parts[1] if len(parts) == 2 else key
+    source, problem_id = parse_nowcoder_key(key)
+
+    if source == "legacy":
+        # 早期的 ``nowcoder:题名`` 格式，题名就是全部信息。
         return ProblemInfo(
             platform=Platform.NOWCODER,
             key=key,
-            name=name,
-            url=problem_url(Platform.NOWCODER, name),
+            name=problem_id,
+            url=problem_url(Platform.NOWCODER, problem_id),
         )
-
-    source, problem_id = parts[1], parts[2]
 
     if source == "contest":
         url = f"https://ac.nowcoder.com/acm/problem/{problem_id}"

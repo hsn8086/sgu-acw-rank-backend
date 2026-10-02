@@ -14,6 +14,9 @@ SQLite 支持加列，而且加列是 O(1) 的元数据操作，不重写表。
 
 只处理加列。删列、改类型、加约束这些 SQLite 支持得不好，真需要时应该
 另写迁移并配合数据搬运，不该由这个脚本悄悄做。
+
+除了加列，这里还修**历史数据格式**。加列是结构问题，格式是内容问题，
+但两者都是「升级一次就完事」的事，分两个脚本反而容易漏跑一个。
 """
 
 from __future__ import annotations
@@ -84,14 +87,64 @@ def missing_columns() -> dict[str, list[tuple[str, str]]]:
     return result
 
 
+def _fix_nowcoder_keys(*, check_only: bool = False) -> int:
+    """给牛客的历史题号补上来源前缀。
+
+    早期的题单功能让管理员直接填数字（``233234``），但过题记录里存的是带
+    来源前缀的 key（``nowcoder:contest:233234``）。两边对不上，于是：
+
+    * 完成度永远算成 0 —— 比对时一个是裸数字一个有前缀，永远不相等；
+    * 题名抓不到 —— 抓取按 ``来源:题号`` 解析，裸数字走不进任何分支。
+
+    数字在牛客上是竞赛站的题目 id（主站的题是 uuid，不是数字），所以统一
+    补成 ``nowcoder:contest:{数字}``。
+
+    两张表都要修：``problem_list_items``（题单里有什么）和
+    ``problem_cache``（抓回来的题目元信息）。只修一张的话，另一张仍然
+    对不上。
+    """
+    from sqlalchemy import text
+
+    fixed = 0
+    tables = ("problem_list_items", "problem_cache")
+    with get_engine().begin() as connection:
+        for table in tables:
+            rows = connection.execute(
+                text(
+                    f"SELECT id, key FROM {table} "  # noqa: S608  表名是常量
+                    "WHERE platform = 'nowcoder' "
+                    "AND key GLOB '[0-9]*' "
+                    "AND key NOT LIKE '%:%'"
+                )
+            ).fetchall()
+            if not rows:
+                continue
+            if check_only:
+                logger.warning("%s 有 %d 条牛客题号缺前缀", table, len(rows))
+                fixed += len(rows)
+                continue
+
+            for row_id, key in rows:
+                connection.execute(
+                    text(f"UPDATE {table} SET key = :key WHERE id = :id"),  # noqa: S608
+                    {"key": f"nowcoder:contest:{key}", "id": row_id},
+                )
+            logger.info("%s 修了 %d 条牛客题号", table, len(rows))
+            fixed += len(rows)
+
+    return fixed
+
+
 def run_migration(*, check_only: bool = False) -> int:
     """补列。返回补了几列。"""
     init_db()  # 先把缺的表建出来
 
+    fixed = _fix_nowcoder_keys(check_only=check_only)
+
     pending = missing_columns()
     if not pending:
         logger.info("没有缺的列")
-        return 0
+        return fixed
 
     total = 0
     for table_name, columns in pending.items():
@@ -110,7 +163,7 @@ def run_migration(*, check_only: bool = False) -> int:
                 connection.exec_driver_sql(statement)
             total += 1
 
-    return total
+    return total + fixed
 
 
 def main() -> None:
@@ -118,9 +171,9 @@ def main() -> None:
     check_only = "--check" in sys.argv
     count = run_migration(check_only=check_only)
     if check_only:
-        print(f"缺 {count} 列" if count else "结构是最新的")
+        print(f"有 {count} 处待处理" if count else "结构和数据都是最新的")
     else:
-        print(f"补了 {count} 列" if count else "结构已经是最新的")
+        print(f"处理了 {count} 处" if count else "结构和数据已经是最新的")
 
 
 if __name__ == "__main__":

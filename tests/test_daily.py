@@ -1157,3 +1157,162 @@ def test_api_reports_checkin_state(root_client, env):
     assert after["checkin_days"] == 1
     assert after["checked_in_today"] is True
     assert after["checked_in_today_names"] == ["root"]
+
+
+# --------------------------------------------------------------------------- #
+# 题号规范化
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_nowcoder_numeric_key(env):
+    """牛客的裸数字补成竞赛站。
+
+    数字在牛客上是竞赛站的题目 id（主站的题是 uuid，不是数字）。
+    不补的话，题单里存的是裸数字，过题记录里是带前缀的 key，两边
+    永远比对不上，完成度一直显示 0。
+    """
+    from app.models import Platform
+    from app.problems import normalize_key
+
+    assert normalize_key(Platform.NOWCODER, "233234") == "nowcoder:contest:233234"
+    assert normalize_key(Platform.NOWCODER, "  233234  ") == "nowcoder:contest:233234"
+
+
+def test_normalize_nowcoder_keeps_existing_prefix(env):
+    """已经带前缀的原样返回，不能叠一层。"""
+    from app.models import Platform
+    from app.problems import normalize_key
+
+    assert (
+        normalize_key(Platform.NOWCODER, "nowcoder:contest:233234")
+        == "nowcoder:contest:233234"
+    )
+    assert (
+        normalize_key(Platform.NOWCODER, "nowcoder:main:abc-123")
+        == "nowcoder:main:abc-123"
+    )
+
+
+def test_normalize_nowcoder_uuid_goes_to_main(env):
+    """带字母的当作主站 uuid。
+
+    主站的题面路径是 questionTerminal/{uuid}，走竞赛站会 404。
+    """
+    from app.models import Platform
+    from app.problems import normalize_key
+
+    assert normalize_key(Platform.NOWCODER, "abc123def") == "nowcoder:main:abc123def"
+
+
+def test_normalize_leaves_other_platforms_alone(env):
+    """别的平台不转换。"""
+    from app.models import Platform
+    from app.problems import normalize_key
+
+    for platform, key in [
+        (Platform.CODEFORCES, "1004A"),
+        (Platform.LUOGU, "P1001"),
+        (Platform.ATCODER, "dp_h"),
+    ]:
+        assert normalize_key(platform, key) == key
+
+
+def test_nowcoder_url_accepts_all_key_forms(env):
+    """牛客题号的三种写法都要拼得出地址。
+
+    * ``nowcoder:contest:233234`` —— 内部标准格式
+    * ``contest:233234`` —— 去掉平台名
+    * ``233234`` —— 迁移前的裸数字
+
+    标准格式这条曾经是坏的：拼链接那边按 ``split(":", 1)`` 解析，会把
+    ``nowcoder`` 当成来源，两个分支都不匹配，全部落到搜索页。也就是说
+    所有牛客题目的链接都点不到题面。
+    """
+    from app.models import Platform
+    from app.problems import problem_url
+
+    for key in ("nowcoder:contest:233234", "contest:233234", "233234"):
+        assert (
+            problem_url(Platform.NOWCODER, key)
+            == "https://ac.nowcoder.com/acm/problem/233234"
+        ), f"{key} 没拼对"
+
+    for key in ("nowcoder:main:abc-123", "main:abc-123"):
+        assert (
+            problem_url(Platform.NOWCODER, key)
+            == "https://www.nowcoder.com/questionTerminal/abc-123"
+        ), f"{key} 没拼对"
+
+
+def test_parse_nowcoder_key_handles_all_forms(env):
+    """解析出来的来源和 id 要对，拼链接和抓题目都靠它。"""
+    from app.problems import parse_nowcoder_key
+
+    assert parse_nowcoder_key("233234") == ("contest", "233234")
+    assert parse_nowcoder_key("nowcoder:contest:233234") == ("contest", "233234")
+    assert parse_nowcoder_key("contest:233234") == ("contest", "233234")
+    assert parse_nowcoder_key("nowcoder:main:abc-123") == ("main", "abc-123")
+    # 早期的 ``nowcoder:题名`` 格式
+    assert parse_nowcoder_key("nowcoder:A+B Problem") == ("legacy", "A+B Problem")
+
+
+# --------------------------------------------------------------------------- #
+# AtCoder 地址
+# --------------------------------------------------------------------------- #
+
+
+def test_atcoder_url_handles_contest_without_digits(env):
+    """比赛名里没有数字也要能拼。
+
+    ``dp`` 是 AtCoder 的经典 DP 专题赛，名字里一个数字都没有。原来那个
+    「字母 + 数字」的模式匹配不上，落到兜底的竞赛列表页，抓回来的是
+    列表页 HTML，取不到标题。
+    """
+    from app.models import Platform
+    from app.problems import problem_url
+
+    assert (
+        problem_url(Platform.ATCODER, "dp_h")
+        == "https://atcoder.jp/contests/dp/tasks/dp_h"
+    )
+
+
+def test_atcoder_url_handles_digits_at_the_end(env):
+    """``typical90`` 这种数字在末尾的也要支持。"""
+    from app.models import Platform
+    from app.problems import problem_url
+
+    assert (
+        problem_url(Platform.ATCODER, "typical90_a")
+        == "https://atcoder.jp/contests/typical90/tasks/typical90_a"
+    )
+
+
+def test_atcoder_url_handles_numeric_problem_suffix(env):
+    """``abc001_1``：题号部分是数字而不是字母。"""
+    from app.models import Platform
+    from app.problems import problem_url
+
+    assert (
+        problem_url(Platform.ATCODER, "abc001_1")
+        == "https://atcoder.jp/contests/abc001/tasks/abc001_1"
+    )
+
+
+def test_atcoder_url_handles_compound_contest_name(env):
+    """``joi2020yo1a``：比赛名里数字和字母交错。"""
+    from app.models import Platform
+    from app.problems import problem_url
+
+    assert (
+        problem_url(Platform.ATCODER, "joi2020yo1a_a")
+        == "https://atcoder.jp/contests/joi2020yo1a/tasks/joi2020yo1a_a"
+    )
+
+
+def test_atcoder_url_without_underscore_falls_back(env):
+    """格式不对时退回竞赛列表，不要拼出坏地址。"""
+    from app.models import Platform
+    from app.problems import problem_url
+
+    assert problem_url(Platform.ATCODER, "abc300") == "https://atcoder.jp/contests/"

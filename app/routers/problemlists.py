@@ -33,7 +33,7 @@ from ..problemlists import (
     detail,
     summarize,
 )
-from ..problems import fetch_all_codeforces, fetch_one, problem_url
+from ..problems import fetch_all_codeforces, fetch_one, normalize_key, problem_url
 from ..schemas import (
     ProblemEntry,
     ProblemItemCreate,
@@ -288,7 +288,9 @@ def lookup_problem(
     if platform not in Platform.ALL:
         raise HTTPException(status_code=400, detail="未知的平台")
 
-    key = key.strip()
+    # 规范化必须在查缓存之前：用户填的是裸数字（牛客），缓存里存的是
+    # 带来源前缀的 key，不转的话永远查不到。
+    key = normalize_key(platform, key)
     if not key:
         raise HTTPException(status_code=400, detail="题号不能为空")
 
@@ -451,7 +453,12 @@ def add_problem(
     if count >= MAX_PROBLEMS_PER_LIST:
         raise HTTPException(status_code=400, detail=f"一个题单最多 {MAX_PROBLEMS_PER_LIST} 题")
 
-    key = payload.key.strip()
+    # 存进题单之前规范化。存成裸数字的话，过题记录（带前缀）比对不上，
+    # 完成度永远算成 0。
+    key = normalize_key(payload.platform, payload.key)
+    if not key:
+        raise HTTPException(status_code=400, detail="题号不能为空")
+
     duplicate = db.exec(
         select(ProblemListItem).where(
             ProblemListItem.list_id == list_id,
