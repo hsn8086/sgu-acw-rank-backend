@@ -358,6 +358,7 @@ def _fetch_and_cache(db: Session, platform: str, key: str):
     row.rating = info.rating
     row.tags_json = json.dumps(info.tags, ensure_ascii=False)
     row.url = info.url or problem_url(platform, key)
+    row.solved_count = info.solved_count
     row.missing_reason = info.missing_reason
     row.fetched_at = utcnow()
     db.commit()
@@ -400,6 +401,7 @@ def refresh_codeforces(
                     rating=info.rating,
                     tags_json=json.dumps(info.tags, ensure_ascii=False),
                     url=info.url,
+                    solved_count=info.solved_count,
                     fetched_at=utcnow(),
                 )
             )
@@ -408,12 +410,20 @@ def refresh_codeforces(
 
         # 已有的也要更新：之前可能有抓失败留下的空壳，跳过的话它永远
         # 补不上。题目名偶尔也会被官方改。
-        if row.name != info.name or row.rating != info.rating:
+        #
+        # solved_count 也算进「变了没」的判断：这个字段是后加的，老数据
+        # 全是空的，不比对的话重跑一次全量抓取也不会把值补上。
+        if (
+            row.name != info.name
+            or row.rating != info.rating
+            or row.solved_count != info.solved_count
+        ):
             updated += 1
         row.name = info.name
         row.rating = info.rating
         row.tags_json = json.dumps(info.tags, ensure_ascii=False)
         row.url = info.url
+        row.solved_count = info.solved_count
         row.missing_reason = ""
         row.fetched_at = utcnow()
 

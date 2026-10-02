@@ -474,6 +474,48 @@ class SyncRun(SQLModel, table=True):
 # --------------------------------------------------------------------------- #
 
 
+class DailyProblemSolve(SQLModel, table=True):
+    """某人某天做对了每日一题里的哪道。
+
+    「签到」记的是这件事，不是「今天有没有做题」。两者不一样：平时刷题
+    再多，没碰当天的每日一题就不算签到。
+
+    **为什么不能靠已有数据算出来**：
+
+    ``solved_snapshots`` 只存了「做过哪些题」，没存时间——同步时把
+    ``SolvedSet.problems`` 里的时间戳丢掉了。而每日一题的题号是每天变的，
+    想反查「这道题是哪天出的、谁在那天做对了」得先有题→日期的映射，
+    再从提交时间倒推，绕一大圈还依赖平台给的时间精度。
+
+    所以同步时直接比对：抓到的已过题目里，有没有当天的每日一题。有就
+    落一条记录。这样签到与「题目当天出、当天做」严格对应。
+
+    洛谷没有时间戳（``fetch_solved_luogu`` 一律给 0），它只能靠快照差分
+    判断「新过了哪些题」。那种情况下也做同样的比对，只是「哪天做对的」
+    精确到同步当天。
+    """
+
+    __tablename__ = "daily_problem_solves"
+    __table_args__ = (
+        UniqueConstraint("user_id", "day", name="uq_daily_solve_user_day"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+
+    #: 签到日期，东八区，YYYY-MM-DD。
+    day: str = Field(max_length=10, index=True)
+
+    #: 当天做对的那道题。三道里任意一道就算签到，记下第一道。
+    platform: str = Field(max_length=16)
+    key: str = Field(max_length=128)
+
+    #: 首次记录的账号，排查用。
+    account_id: int | None = Field(default=None, foreign_key="accounts.id")
+
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class ProblemCache(SQLModel, table=True):
     """题目元信息的缓存。
 
@@ -507,9 +549,54 @@ class ProblemCache(SQLModel, table=True):
     #: 题面链接。有些平台光靠题号拼不出链接，所以存下来。
     url: str = Field(default="", max_length=500)
 
+    #: 有多少人过了。只有 CF 给（``problemStatistics`` 里带的）。
+    #:
+    #: 每日一题拿它当难度可信度的门槛：过的人越多，rating 越准。早年有些
+    #: 题只有几十个人做，rating 是估出来的，能差好几百。
+    solved_count: int | None = None
+
     #: 抓不到信息时记下原因，前端显示成「信息缺失」而不是空着。
     missing_reason: str = Field(default="", max_length=200)
     fetched_at: datetime = Field(default_factory=utcnow)
+
+
+class DailyProblem(SQLModel, table=True):
+    """每日一题。
+
+    每天三道，按难度分档各抽一道（800-1000 / 1100-1300 / 1400-1600）。
+    抽中过的题不再参与后续抽取，直到整池抽完——这样一轮下来覆盖面是
+    均匀的，不会反复抽到那几十道「经典入门题」。
+
+    **为什么抽中的题要落库，而不是每次按日期现算**：
+
+    拿日期当随机种子确实能保证「同一天所有人看到同一套」，但题库会变。
+    CF 时不时加新题、补 rating，题库一变，同一个日期算出来的结果就跟着
+    变——昨天做的题今天再看成了另一道，这种事没法跟用户解释。
+
+    所以抽中的那一刻就写进这张表，之后只读这份记录。种子仍然留着，用来
+    复现「当时为什么抽到这道」，但不参与业务判断。
+
+    平台先只支持 CF：rating 是官方标的，而且题库带 solvedCount，能过滤掉
+    乱标难度的题（见 ``daily.py``）。其他平台等有可靠难度来源再说。
+    """
+
+    __tablename__ = "daily_problems"
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    #: 出题日期，按工作坊时区算，格式 YYYY-MM-DD。
+    day: str = Field(max_length=10, index=True)
+
+    #: 难度档位，见 ``daily.BANDS`` 的键。
+    band: str = Field(max_length=16)
+
+    platform: str = Field(max_length=16, default="codeforces")
+    key: str = Field(max_length=128, index=True)
+
+    #: 抽签种子，排查用。
+    seed: str = Field(default="", max_length=64)
+
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 class ProblemList(SQLModel, table=True):

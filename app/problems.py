@@ -86,6 +86,8 @@ class ProblemInfo:
     rating: int | None = None
     tags: list[str] = field(default_factory=list)
     url: str = ""
+    #: 有多少人过了。只有 CF 给，其他平台留空。
+    solved_count: int | None = None
     #: 抓不到时记下原因，前端显示成「信息缺失」而不是空着让人以为是 bug。
     missing_reason: str = ""
 
@@ -152,6 +154,15 @@ def fetch_all_codeforces(client: httpx.Client) -> list[ProblemInfo]:
     if payload.get("status") != "OK":
         raise RuntimeError(f"Codeforces: {payload.get('comment', '查询失败')}")
 
+    # 过题人数在另一个数组里，按 (比赛 id, 题号) 对起来。
+    solved_by_key: dict[tuple[int, str], int] = {}
+    for stat in payload["result"].get("problemStatistics", []):
+        contest_id = stat.get("contestId")
+        index = stat.get("index")
+        if contest_id is None or index is None:
+            continue
+        solved_by_key[(contest_id, index)] = int(stat.get("solvedCount") or 0)
+
     out: list[ProblemInfo] = []
     for problem in payload["result"]["problems"]:
         contest_id = problem.get("contestId")
@@ -167,6 +178,7 @@ def fetch_all_codeforces(client: httpx.Client) -> list[ProblemInfo]:
                 rating=problem.get("rating"),
                 tags=list(problem.get("tags", [])),
                 url=problem_url(Platform.CODEFORCES, key),
+                solved_count=solved_by_key.get((contest_id, index)),
             )
         )
     return out

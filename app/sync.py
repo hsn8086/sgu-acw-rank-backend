@@ -20,14 +20,16 @@ from __future__ import annotations
 import json
 import logging
 from collections import Counter
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 from sqlmodel import Session, select
 
+from . import daytime
 from .config import get_settings
 from .db import get_engine, init_db, session_scope
 from .models import (
     Account,
+    DailyProblem,
     DailyProgress,
     Platform,
     SolvedSnapshot,
@@ -40,15 +42,6 @@ logger = logging.getLogger("sgu_acw.sync")
 
 #: 统计口径按东八区切日。CF 和 AtCoder 的时间戳是 UTC，成员说的「今天」
 #: 是北京时间，直接按 UTC 分会把晚上的提交算到第二天。
-CST = timezone(timedelta(hours=8))
-
-#: 一天的起点定在凌晨 4 点而不是 0 点。
-#:
-#: 比赛经常打到半夜，凌晨一两点交的题在感觉上属于「昨天那一场」。按自然日
-#: 切会把这些散到第二天，看上去像是第二天在刷题。定在 4 点，凌晨 0 到 3 点
-#: 的记录仍然算前一天。
-DAY_BOUNDARY_HOUR = 4
-
 #: 差分时最多回溯多久。如果两次同步隔了特别久（服务停了很久），把增量
 #: 平摊到每天会让某一天虚高，不如只记最近这些天，其余忽略。
 MAX_BACKFILL_DAYS = 7
@@ -57,24 +50,15 @@ MAX_BACKFILL_DAYS = 7
 RETENTION_DAYS = 400
 
 
-def _day_of(epoch: int) -> str:
-    """epoch 秒 → 练习日的 YYYY-MM-DD。
+# 「一天」的定义在 daytime 里，每日一题那边也要用同一套。这里保留
+# practice_day_of / current_practice_day 这两个名字，是因为路由层和测试
+# 都按这些名字在调，改名没有好处。
+_day_of = daytime.day_of_epoch
+practice_day_of = daytime.day_of
+current_practice_day = daytime.today
 
-    练习日以东八区凌晨 4 点为界：先转成北京时间，再减去 4 小时，取日期。
-    于是 0 点到 3 点 59 分的记录归到前一天。
-    """
-    return practice_day_of(datetime.fromtimestamp(epoch, UTC))
-
-
-def practice_day_of(moment: datetime) -> str:
-    """某个时刻属于哪个练习日。用于把任意时间归到练习日上。"""
-    local = moment.astimezone(CST)
-    return (local - timedelta(hours=DAY_BOUNDARY_HOUR)).strftime("%Y-%m-%d")
-
-
-def current_practice_day() -> str:
-    """此刻属于哪个练习日。"""
-    return practice_day_of(utcnow())
+#: 东八区。测试和路由按这个名字在用，重新导出。
+CST = daytime.CST
 
 
 def _upsert_progress(
@@ -281,7 +265,42 @@ def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple
         account.last_active_at = now
     db.add(account)
 
+    _record_daily_checkin(db, account, solved)
+
     return True, detail, added
+
+
+def _record_daily_checkin(db: Session, account: Account, solved) -> None:
+    """看看这个人今天有没有做对每日一题，有就记一次签到。
+
+    在同步末尾做，因为要拿到的正是刚抓回来的已过题目。放在这里还有个
+    好处：成员一同步就自动签到，不用额外点一下按钮。
+
+    只比对**今天**的题。昨天的题今天才做出来不算今天的签到——「每日」
+    一题的意思就是当天的。
+
+    没有每日一题（还没抽、或者题库没准备好）时静默跳过，不能因为这个小
+    功能让整个同步失败。
+    """
+    from .daily import record_solves, workshop_today
+
+    day = workshop_today()
+    today_problems = db.exec(select(DailyProblem).where(DailyProblem.day == day)).all()
+    if not today_problems:
+        return
+
+    wanted = {(row.platform, row.key) for row in today_problems}
+    hit = wanted & {(account.platform, str(key)) for key in solved.problems}
+    if not hit:
+        return
+
+    record_solves(
+        db,
+        user_id=account.user_id,
+        account_id=account.id,
+        day=day,
+        solved_keys=hit,
+    )
 
 
 def _save_snapshot(db: Session, account: Account, solved) -> None:
