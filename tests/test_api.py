@@ -300,3 +300,71 @@ def test_luogu_error_falls_back_when_body_is_not_json():
     # JSON 里没有 errorMessage 也一样
     empty = httpx.Response(500, json={"status": 500, "data": {}})
     assert _luogu_error(empty) == "洛谷返回 500"
+
+
+# --------------------------------------------------------------------------- #
+# 牛客的题号
+# --------------------------------------------------------------------------- #
+
+
+def test_nowcoder_contest_problem_name_comes_from_title():
+    """竞赛站的题目名从题面页的标题取。
+
+    题号是数字 id，不是题名——早先的实现把 id 丢了，拿题名当键，题名一改
+    就对不上了。
+    """
+    from app.problems import fetch_nowcoder_problem
+
+    class FakeResponse:
+        status_code = 200
+        text = "<html><head><title>小月的字符集_牛客竞赛OJ</title></head></html>"
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    info = fetch_nowcoder_problem(FakeClient(), "nowcoder:contest:324140")
+    assert info.name == "小月的字符集"
+    assert info.url == "https://ac.nowcoder.com/acm/problem/324140"
+    assert info.missing_reason == ""
+
+
+def test_nowcoder_main_problem_name_comes_from_title():
+    """主站用 questionUuid 拼题面地址，标题里带着题名。"""
+    from app.problems import fetch_nowcoder_problem
+
+    class FakeResponse:
+        status_code = 200
+        text = "<html><head><title>多组输入a+b II__牛客网</title></head></html>"
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+    info = fetch_nowcoder_problem(FakeClient(), "nowcoder:main:37cad29015e3457ba256e3319436d0e6")
+    assert info.name == "多组输入a+b II"
+    assert info.url == "https://www.nowcoder.com/questionTerminal/37cad29015e3457ba256e3319436d0e6"
+
+
+def test_nowcoder_problem_survives_fetch_failure():
+    """抓不到名字不算错，说明原因就行——题单里显示题号也是可用的。"""
+    from app.problems import fetch_nowcoder_problem
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            raise RuntimeError("网络断了")
+
+    info = fetch_nowcoder_problem(FakeClient(), "nowcoder:contest:324140")
+    assert info.name == ""
+    assert "抓取失败" in info.missing_reason
+
+
+def test_nowcoder_problem_key_accepts_legacy_format():
+    """老的 ``nowcoder:题名`` 格式仍然认。
+
+    生产库里可能已经有这种记录，读的时候不该炸。
+    """
+    from app.problems import fetch_nowcoder_problem
+
+    info = fetch_nowcoder_problem(None, "nowcoder:A+B Problem")
+    assert info.name == "A+B Problem"

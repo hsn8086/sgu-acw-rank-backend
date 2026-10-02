@@ -330,8 +330,12 @@ def test_nowcoder_row_parsing():
     """
     rows = _nowcoder_rows(page)
     assert len(rows) == 2
-    assert rows[0] == ("84566970", "恋爱模拟器", "答案正确", "2026-08-19 23:47:35")
-    assert rows[1][2] == "答案错误"
+    assert rows[0].run_id == "84566970"
+    assert rows[0].problem_id == "318505", "题目 id 要从链接里取，剥标签会丢掉"
+    assert rows[0].title == "恋爱模拟器"
+    assert rows[0].verdict == "答案正确"
+    assert rows[0].submitted_at == "2026-08-19 23:47:35"
+    assert rows[1].verdict == "答案错误"
 
     # 页面上的时间是北京时间，不带时区标记。
     epoch = _parse_nowcoder_time("2026-08-19 23:47:35")
@@ -345,19 +349,66 @@ def _day_of_epoch(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, UTC).astimezone(CST).strftime("%Y-%m-%d")
 
 
-def test_nowcoder_only_counts_accepted(env, monkeypatch):
-    """只有「答案正确」计入，错误提交不算过题。"""
-    from app.platforms import (
-        _nowcoder_rows,  # noqa: F401
-        fetch_solved_nowcoder,
-    )
+def test_nowcoder_counts_both_sources(env):
+    """牛客要同时抓竞赛站和主站。
+
+    两边几乎不重合——实测某用户主站 88 题、竞赛站 192 题，交集只有 1 题。
+    只抓一边会漏掉一大块。
+    """
+    from app.platforms import fetch_solved_nowcoder
+
+    contest_page = """
+    <table><tbody>
+    <tr><td>1</td><td><a href="/acm/problem/318505">题目甲</a></td>
+        <td>答案正确</td><td>100</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-20 10:00:00</td></tr>
+    </tbody></table>
+    """
+
+    class FakeResponse:
+        status_code = 200
+        text = contest_page
+
+        @staticmethod
+        def json():
+            return {
+                "success": True,
+                "code": 0,
+                "data": {
+                    "total": 1,
+                    "records": [
+                        {
+                            "problem": {"questionUuid": "uuid-abc", "title": "多组输入"},
+                            "accept": True,
+                            "submission": {"createdDate": 1790932328000},
+                        }
+                    ],
+                },
+            }
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    solved = fetch_solved_nowcoder(FakeClient(), "825377486")
+    assert set(solved.problems) == {"nowcoder:contest:318505", "nowcoder:main:uuid-abc"}
+
+
+def test_nowcoder_contest_only_counts_accepted(env):
+    """没通过的提交不算过题。"""
+    from app.platforms import fetch_solved_nowcoder
 
     page = """
     <table><tbody>
-    <tr><td>1</td><td>题目甲</td><td>答案正确</td><td>100</td><td>1</td>
-        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-19 10:00:00</td></tr>
-    <tr><td>2</td><td>题目乙</td><td>答案错误</td><td>0</td><td>1</td>
-        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-19 11:00:00</td></tr>
+    <tr><td>1</td><td><a href="/acm/problem/318505">题目甲</a></td>
+        <td>答案正确</td><td>100</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-20 10:00:00</td></tr>
+    <tr><td>2</td><td><a href="/acm/problem/318506">题目乙</a></td>
+        <td>运行超时</td><td>100</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-20 10:00:00</td></tr>
     </tbody></table>
     """
 
@@ -365,12 +416,19 @@ def test_nowcoder_only_counts_accepted(env, monkeypatch):
         status_code = 200
         text = page
 
+        @staticmethod
+        def json():
+            return {"success": True, "code": 0, "data": {"total": 0, "records": []}}
+
     class FakeClient:
         def get(self, *args, **kwargs):
             return FakeResponse()
 
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
     solved = fetch_solved_nowcoder(FakeClient(), "825377486")
-    assert set(solved.problems) == {"nowcoder:题目甲"}
+    assert set(solved.problems) == {"nowcoder:contest:318505"}
 
 
 def test_nowcoder_dedupes_by_earliest(env):
@@ -379,9 +437,11 @@ def test_nowcoder_dedupes_by_earliest(env):
 
     page = """
     <table><tbody>
-    <tr><td>1</td><td>题目甲</td><td>答案正确</td><td>100</td><td>1</td>
+    <tr><td>1</td><td><a href="/acm/problem/318505">题目甲</a></td>
+        <td>答案正确</td><td>100</td><td>1</td>
         <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-20 10:00:00</td></tr>
-    <tr><td>2</td><td>题目甲</td><td>答案正确</td><td>100</td><td>1</td>
+    <tr><td>2</td><td><a href="/acm/problem/318505">题目甲</a></td>
+        <td>答案正确</td><td>100</td><td>1</td>
         <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-19 10:00:00</td></tr>
     </tbody></table>
     """
@@ -390,12 +450,95 @@ def test_nowcoder_dedupes_by_earliest(env):
         status_code = 200
         text = page
 
+        @staticmethod
+        def json():
+            return {"success": True, "code": 0, "data": {"total": 0, "records": []}}
+
     class FakeClient:
         def get(self, *args, **kwargs):
             return FakeResponse()
 
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
     solved = fetch_solved_nowcoder(FakeClient(), "825377486")
-    assert _day_of_epoch(solved.problems["nowcoder:题目甲"]) == "2026-08-19"
+    assert _day_of_epoch(solved.problems["nowcoder:contest:318505"]) == "2026-08-19"
+
+
+def test_nowcoder_main_dedupes_by_earliest(env):
+    """主站同一题多次通过也只记最早一次。"""
+    from app.platforms import fetch_solved_nowcoder
+
+    class FakeResponse:
+        status_code = 200
+        text = "<table><tbody></tbody></table>"
+
+        @staticmethod
+        def json():
+            return {
+                "success": True,
+                "code": 0,
+                "data": {
+                    "total": 2,
+                    "records": [
+                        {
+                            "problem": {"questionUuid": "uuid-xyz", "title": "加法入门"},
+                            "accept": True,
+                            "submission": {"createdDate": 1790932328000},
+                        },
+                        {
+                            "problem": {"questionUuid": "uuid-xyz", "title": "加法入门"},
+                            "accept": True,
+                            "submission": {"createdDate": 1780000000000},
+                        },
+                    ],
+                },
+            }
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return FakeResponse()
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    solved = fetch_solved_nowcoder(FakeClient(), "825377486")
+    assert _day_of_epoch(solved.problems["nowcoder:main:uuid-xyz"]) == "2026-05-29"
+
+
+def test_nowcoder_survives_one_source_failing(env):
+    """一边挂了不该让整个同步失败——另一边往往还有数据。"""
+    from app.platforms import fetch_solved_nowcoder
+
+    contest_page = """
+    <table><tbody>
+    <tr><td>1</td><td><a href="/acm/problem/318505">题目甲</a></td>
+        <td>答案正确</td><td>100</td><td>1</td>
+        <td>1</td><td>1</td><td>PyPy3</td><td>2026-08-20 10:00:00</td></tr>
+    </tbody></table>
+    """
+
+    class OkResponse:
+        status_code = 200
+        text = contest_page
+
+    class BrokenResponse:
+        status_code = 500
+        text = ""
+
+        @staticmethod
+        def json():
+            return {}
+
+    class FakeClient:
+        def get(self, *args, **kwargs):
+            return OkResponse()
+
+        def post(self, *args, **kwargs):
+            return BrokenResponse()
+
+    solved = fetch_solved_nowcoder(FakeClient(), "825377486")
+    assert set(solved.problems) == {"nowcoder:contest:318505"}
 
 
 # --------------------------------------------------------------------------- #

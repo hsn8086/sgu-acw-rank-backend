@@ -121,8 +121,15 @@ def problem_url(platform: str, key: str) -> str:
         return "https://atcoder.jp/contests/"
 
     if platform == Platform.NOWCODER:
-        # 牛客的题号其实是题名，没有稳定 URL，给搜索页。
-        return f"https://www.nowcoder.com/search?query={key}&type=question"
+        # 牛客的 key 是 ``main:{id}`` 或 ``contest:{id}``，两边的题面路径不同。
+        parts = key.split(":", 1)
+        if len(parts) == 2:
+            source, problem_id = parts
+            if source == "contest":
+                return f"https://ac.nowcoder.com/acm/problem/{problem_id}"
+            if source == "main":
+                return f"https://www.nowcoder.com/questionTerminal/{problem_id}"
+        return "https://www.nowcoder.com/exam/oj"
 
     return ""
 
@@ -239,19 +246,73 @@ def fetch_atcoder_problem(client: httpx.Client, key: str) -> ProblemInfo:
 
 
 def fetch_nowcoder_problem(client: httpx.Client, key: str) -> ProblemInfo:
-    """牛客没有题目接口。
+    """牛客的题目信息。
 
-    题号本身就是题名（``nowcoder:A+B Problem``），所以名字直接从题号里取，
-    不用请求。这不算「抓到」——它是题号自带的，但显示出来是对的。
+    题号格式是 ``nowcoder:{来源}:{题目 id}``，来源是 ``main`` 或 ``contest``。
+    两边的 id 体系不同，题面路径也不同：
+
+    * 竞赛站 ``contest``：``/acm/problem/{id``，标题就是题目名。
+    * 主站 ``main``：``/questionTerminal/{uuid}``，但过题记录里存的是数字
+      ``questionId``，拼不出这个路径，所以抓不到名字。
+
+    抓不到名字不算错——题单里显示题号也是可用的，只是不够好看。
     """
-    name = key.split(":", 1)[1] if ":" in key else key
-    return ProblemInfo(
-        platform=Platform.NOWCODER,
-        key=key,
-        name=name,
-        url=problem_url(Platform.NOWCODER, name),
-        missing_reason="" if name else "题号里没有题名",
-    )
+    parts = key.split(":", 2)
+    if len(parts) != 3:
+        # 老的 ``nowcoder:题名`` 格式，生产库里可能还有。
+        name = parts[1] if len(parts) == 2 else key
+        return ProblemInfo(
+            platform=Platform.NOWCODER,
+            key=key,
+            name=name,
+            url=problem_url(Platform.NOWCODER, name),
+        )
+
+    source, problem_id = parts[1], parts[2]
+
+    if source == "contest":
+        url = f"https://ac.nowcoder.com/acm/problem/{problem_id}"
+        info = ProblemInfo(platform=Platform.NOWCODER, key=key, url=url)
+        try:
+            response = client.get(url)
+        except Exception as exc:  # noqa: BLE001
+            info.missing_reason = f"抓取失败：{exc}"
+            return info
+
+        if response.status_code != 200:
+            info.missing_reason = f"牛客返回 {response.status_code}"
+            return info
+
+        # 标题形如「小月的对局_牛客竞赛OJ」，去掉后缀。
+        match = re.search(r"<title>(.*?)</title>", response.text, re.S)
+        if match:
+            title = html.unescape(match.group(1)).strip()
+            info.name = re.sub(r"_(牛客|牛客竞赛OJ|牛客网).*$", "", title).strip()
+        if not info.name:
+            info.missing_reason = "取不到题目名"
+        return info
+
+    # 主站：key 里存的是 questionUuid，能拼出题面地址。
+    url = f"https://www.nowcoder.com/questionTerminal/{problem_id}"
+    info = ProblemInfo(platform=Platform.NOWCODER, key=key, url=url)
+    try:
+        response = client.get(url)
+    except Exception as exc:  # noqa: BLE001
+        info.missing_reason = f"抓取失败：{exc}"
+        return info
+
+    if response.status_code != 200:
+        info.missing_reason = f"牛客返回 {response.status_code}"
+        return info
+
+    # 标题形如「多组输入a+b II__牛客网」，去掉后缀。
+    match = re.search(r"<title>(.*?)</title>", response.text, re.S)
+    if match:
+        title = html.unescape(match.group(1)).strip()
+        info.name = re.sub(r"_{1,2}牛客网?.*$", "", title).strip()
+    if not info.name:
+        info.missing_reason = "取不到题目名"
+    return info
 
 
 FETCHERS = {

@@ -476,17 +476,48 @@ def fetch_solved_luogu(client: httpx.Client, identifier: str) -> SolvedSet:
 
 
 def fetch_solved_nowcoder(client: httpx.Client, identifier: str) -> SolvedSet:
-    """牛客的练习记录。``identifier`` 是数字 uid。
+    """牛客的过题记录。``identifier`` 是数字 uid。
 
-    页面服务端直出表格，每行一次提交，带精确时间与判题结果，所以属于
-    「有时间戳」那一类，不需要快照差分。一页最多 100 条，翻到没有新行为止。
+    牛客有两套记录，**分开计数**，要合并起来才是完整的：
 
-    注意区分两件事：牛客的**比赛**记录（rating-history）拿不到逐题数据，
-    但**练习**记录（practice-coding）是公开且完整的，别把前者当成全部。
+    * **竞赛站**（ac.nowcoder.com）的练习记录。页面服务端直出表格，带精确
+      时间与判题结果。题目只有标题，没有题号。
+    * **主站**（www.nowcoder.com）的提交历史。JSON 接口，有题号、题名和
+      毫秒时间戳。题号形如 ``noob29``、``ACM342``、``BISHI74``。
+
+    两边几乎不重合——实测某用户主站 88 题、竞赛站 192 题，交集只有 1 题。
+    所以只抓一边会漏掉一大块。
+
+    两套的题目用不同前缀区分，否则同名题会互相覆盖。
     """
     if not identifier.isdigit():
         raise FetchError("牛客需要填数字 uid")
 
+    problems: dict[str, int] = {}
+
+    # 竞赛站。抓不到不该让整个同步失败——主站那部分往往还有数据。
+    try:
+        problems.update(_nowcoder_contest_solved(client, identifier))
+    except FetchError:
+        if not problems:
+            raise
+
+    # 主站。同样，失败时保留竞赛站已经拿到的。
+    try:
+        problems.update(_nowcoder_main_solved(client, identifier))
+    except FetchError:
+        if not problems:
+            raise
+
+    return SolvedSet(platform=Platform.NOWCODER, identifier=identifier, problems=problems)
+
+
+def _nowcoder_contest_solved(client: httpx.Client, identifier: str) -> dict[str, int]:
+    """竞赛站的练习记录。
+
+    题目用标题当键——页面上的链接只有题目 id，而同一题在不同比赛里 id 不同，
+    标题反而更稳定。
+    """
     problems: dict[str, int] = {}
     page = 1
     page_size = 100
@@ -500,24 +531,20 @@ def fetch_solved_nowcoder(client: httpx.Client, identifier: str) -> SolvedSet:
         )
         if response.status_code != 200:
             if page == 1:
-                raise FetchError(f"牛客返回 {response.status_code}")
+                raise FetchError(f"牛客竞赛站返回 {response.status_code}")
             break
 
         rows = _nowcoder_rows(response.text)
         if not rows:
-            if page == 1:
-                # 页面能开但没有任何记录：uid 可能不存在，也可能只是没提交过。
-                # 无法区分，按「没有数据」处理而不报错。
-                break
+            # 页面能开但没有任何记录：uid 可能不存在，也可能只是没提交过。
+            # 无法区分，按「没有数据」处理而不报错。
             break
 
-        for _run_id, title, verdict, submitted_at in rows:
-            if verdict != "答案正确":
+        for row in rows:
+            if row.verdict != "答案正确":
                 continue
-            # 题目用标题当键：页面上的链接只有题目 id，但同一题在不同比赛
-            # 里 id 不同，标题反而更稳定。
-            key = f"nowcoder:{title}"
-            epoch = _parse_nowcoder_time(submitted_at)
+            key = f"nowcoder:contest:{row.problem_id}"
+            epoch = _parse_nowcoder_time(row.submitted_at)
             if epoch is None:
                 continue
             if key not in problems or epoch < problems[key]:
@@ -528,7 +555,76 @@ def fetch_solved_nowcoder(client: httpx.Client, identifier: str) -> SolvedSet:
             break
         page += 1
 
-    return SolvedSet(platform=Platform.NOWCODER, identifier=identifier, problems=problems)
+    return problems
+
+
+def _nowcoder_main_solved(client: httpx.Client, identifier: str) -> dict[str, int]:
+    """主站的提交历史。
+
+    接口在 gw-c 子域上，是 POST。``pageSize`` 一次最多 100，比竞赛站页面
+    翻页省事得多。
+
+    题号（``questionNum``）唯一对应一道题，所以用它当键，而不是标题——
+    标题可能带全角空格之类，也可能会改。
+    """
+    problems: dict[str, int] = {}
+    page = 1
+    page_size = 100
+    max_pages = 100
+
+    while page <= max_pages:
+        response = client.post(
+            "https://gw-c.nowcoder.com/api/sparta/user/question-training/submission-history",
+            json={"userId": int(identifier), "pageNo": page, "pageSize": page_size},
+            headers={"Origin": "https://www.nowcoder.com", "Referer": "https://www.nowcoder.com/"},
+        )
+        if response.status_code != 200:
+            if page == 1:
+                raise FetchError(f"牛客主站返回 {response.status_code}")
+            break
+
+        try:
+            payload = response.json()
+        except Exception as exc:  # noqa: BLE001
+            raise FetchError("牛客主站返回了无法解析的内容") from exc
+
+        if not payload.get("success"):
+            if page == 1:
+                raise FetchError(f"牛客主站：{payload.get('msg') or '查询失败'}")
+            break
+
+        data = payload.get("data") or {}
+        records = data.get("records") or []
+        if not records:
+            break
+
+        for record in records:
+            if not record.get("accept"):
+                continue
+            problem = record.get("problem") or {}
+            # 用 questionUuid 当键，不是 questionId：uuid 能拼出题面地址
+            # （/questionTerminal/{uuid}），这样才抓得到题目名。
+            # questionId 是个纯数字，拼不出任何可访问的地址。
+            problem_uuid = problem.get("questionUuid")
+            if not problem_uuid:
+                continue
+            submission = record.get("submission") or {}
+            # 毫秒时间戳。取最早一次通过，与竞赛站那边的口径一致。
+            epoch = submission.get("createdDate")
+            if not isinstance(epoch, (int, float)):
+                continue
+            epoch = int(epoch // 1000)
+
+            key = f"nowcoder:main:{problem_uuid}"
+            if key not in problems or epoch < problems[key]:
+                problems[key] = epoch
+
+        # totalPage 是后端算的，但实测会随 pageSize 变化，所以按实际条数判断。
+        if len(records) < page_size:
+            break
+        page += 1
+
+    return problems
 
 
 #: 牛客表格列：运行ID、题目、运行结果、得分、运行时间、使用内存、代码长度、语言、提交时间。
@@ -537,22 +633,53 @@ _NOWCODER_CELL_RE = re.compile(r"<td[^>]*>(.*?)</td>", re.S)
 _NOWCODER_TIME_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})")
 
 
-def _nowcoder_rows(page: str) -> list[tuple[str, str, str, str]]:
-    """从练习页的表格里取出 (运行ID, 题目, 判题结果, 提交时间)。"""
-    rows: list[tuple[str, str, str, str]] = []
+@dataclass
+class NowcoderRow:
+    """竞赛站练习记录的一行。"""
+
+    run_id: str
+    #: 题目 id，来自题目链接的 ``/acm/problem/{id}``。用它当键而不是题名——
+    #: 题名可能改，也可能带全角空格之类的怪字符。
+    problem_id: str
+    title: str
+    verdict: str
+    submitted_at: str
+
+
+def _nowcoder_rows(page: str) -> list[NowcoderRow]:
+    """从练习页的表格里取出每一行的题目 id、题名、判题结果和提交时间。
+
+    题目那一格是 ``<a href="/acm/problem/318505">大户爱的期望</a>``。早先的
+    做法先把 HTML 标签剥掉再取文字，链接里的 id 就丢了，只能拿题名当键。
+    """
+    rows: list[NowcoderRow] = []
     for raw in _NOWCODER_ROW_RE.findall(page):
-        cells = [
-            re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", cell))).strip()
-            for cell in _NOWCODER_CELL_RE.findall(raw)
-        ]
-        # 只认数据行：至少要有运行ID、题目、结果和提交时间。
+        cells = _NOWCODER_CELL_RE.findall(raw)
         if len(cells) < 9:
             continue
-        run_id, title, verdict = cells[0], cells[1], cells[2]
-        submitted_at = cells[8]
+
+        def text(html_cell: str) -> str:
+            return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", html_cell))).strip()
+
+        run_id = text(cells[0])
+        submitted_at = text(cells[8])
         if not run_id.isdigit() or not _NOWCODER_TIME_RE.match(submitted_at):
             continue
-        rows.append((run_id, title, verdict, submitted_at))
+
+        # 题目 id 在链接里，剥标签会丢掉，所以从原始 HTML 里取。
+        link = re.search(r"/acm/problem/(\d+)", cells[1])
+        if not link:
+            continue
+
+        rows.append(
+            NowcoderRow(
+                run_id=run_id,
+                problem_id=link.group(1),
+                title=text(cells[1]),
+                verdict=text(cells[2]),
+                submitted_at=submitted_at,
+            )
+        )
     return rows
 
 

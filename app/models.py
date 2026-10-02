@@ -478,7 +478,12 @@ class ProblemCache(SQLModel, table=True):
     直接读。题目的名字和难度基本不会变，缓存没有过期时间。
 
     主键是「平台 + 题号」。题号用平台原生的写法：CF 是 ``1234A``，洛谷是
-    ``P1001``，AtCoder 是 ``abc300_a``，牛客是 ``nowcoder:题目名``。
+    ``P1001``，AtCoder 是 ``abc300_a``。
+
+    牛客是例外，它有两套来源，题号里带上来源前缀区分：
+    ``nowcoder:main:noob29``（主站，题号是编号）、
+    ``nowcoder:contest:多组输入a+b II``（竞赛站，题号就是题名）。
+    两边几乎不重合，合并起来才是完整的。
     """
 
     __tablename__ = "problem_cache"
