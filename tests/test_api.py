@@ -255,3 +255,48 @@ def test_bootstrap_falls_back_when_configured_id_is_taken(tmp_path, monkeypatch)
 
     db_module.reset_engine()
     get_settings.cache_clear()
+
+
+# --------------------------------------------------------------------------- #
+# 洛谷的错误说明
+# --------------------------------------------------------------------------- #
+
+
+def test_luogu_error_surfaces_its_own_message():
+    """洛谷出错时要把它的原话透传出来。
+
+    直接报「洛谷返回 403」等于没说：用户不知道该去实名认证，只会以为
+    是我们这边坏了。
+
+    这类 403 不是反爬——反爬返回的是挑战页面（HTML），这个是结构化 JSON。
+    """
+    import httpx
+
+    from app.platforms import _luogu_error
+
+    response = httpx.Response(
+        403,
+        json={
+            "instance": "main",
+            "status": 403,
+            "data": {
+                "errorCode": 403,
+                "errorMessage": "该用户未通过实名认证",
+            },
+        },
+    )
+    assert _luogu_error(response) == "洛谷：该用户未通过实名认证"
+
+
+def test_luogu_error_falls_back_when_body_is_not_json():
+    """返回的不是 JSON（比如真被反爬拦了）时，退回状态码。"""
+    import httpx
+
+    from app.platforms import _luogu_error
+
+    html = httpx.Response(403, text="<html>challenge</html>")
+    assert _luogu_error(html) == "洛谷返回 403"
+
+    # JSON 里没有 errorMessage 也一样
+    empty = httpx.Response(500, json={"status": 500, "data": {}})
+    assert _luogu_error(empty) == "洛谷返回 500"

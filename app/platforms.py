@@ -182,8 +182,36 @@ def _luogu_get(client: httpx.Client, url: str) -> str:
     if second.status_code == 404:
         raise FetchError("洛谷上没有这个用户", not_found=True)
     if second.status_code != 200:
-        raise FetchError(f"洛谷返回 {second.status_code}")
+        raise FetchError(_luogu_error(second))
     return second.text
+
+
+def _luogu_error(response: httpx.Response) -> str:
+    """把洛谷的错误响应翻成人话。
+
+    洛谷出错时返回的是结构化 JSON，里面带着自己的说明：
+
+        {"status": 403, "data": {"errorMessage": "该用户未通过实名认证"}}
+
+    直接报「洛谷返回 403」等于没说——用户不知道该去实名认证，只会以为是
+    我们这边坏了。所以优先把洛谷的原话透传出来。
+
+    这类 403 不是反爬：反爬会返回挑战页面（HTML），而这个是 JSON。
+    """
+
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001 - 不是 JSON 就走下面的兜底
+        payload = None
+
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            message = data.get("errorMessage")
+            if isinstance(message, str) and message.strip():
+                return f"洛谷：{message.strip()}"
+
+    return f"洛谷返回 {response.status_code}"
 
 
 def _luogu_context(page: str) -> dict:
