@@ -1,0 +1,28 @@
+[Unit]
+Description=SGU ACW 题解生成（一次）
+Documentation=https://github.com/hsn8086/sgu-acw-rank-backend
+After=network-online.target sgu-acw-api.service
+Wants=network-online.target
+# 生成要调本机的后端接口。
+Requires=sgu-acw-api.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sgu-acw-editorial
+ExecStart=/opt/sgu-acw-editorial/run.sh
+EnvironmentFile=/etc/sgu-acw-editorial.env
+
+# 生成三道题、每道都要跑一遍三语言验证，比同步任务慢得多。
+# 给 45 分钟；超过说明卡住了（模型无响应或某个验证死循环），掐掉重来。
+TimeoutStartSec=2700
+
+# 生成器需要写 node 的缓存目录，其余只读。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/sgu-acw-editorial
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true

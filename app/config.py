@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     # directly. Empty disables the check (local development).
     origin_secret: str = ""
 
+    # Shared secret for the editorial generator (pi running on the VPS).
+    #
+    # A separate secret from ``origin_secret`` on purpose: the generator is a
+    # local process, not a Cloudflare edge, so it must not be able to call the
+    # public API as if it came through the CDN. This one only unlocks
+    # ``/internal/*``. Empty disables the internal routes entirely.
+    editorial_secret: str = ""
+
+    # Which model the generator asks for. Recorded on every editorial so a
+    # quality regression can be traced back to a model switch.
+    editorial_model: str = "deepseek-flash"
+
     # First-run bootstrap. When the password is set and no user carries this
     # student id yet, a root account is created. Ignored on every later start.
     #

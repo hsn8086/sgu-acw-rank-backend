@@ -24,7 +24,7 @@ from datetime import date, timedelta
 
 from sqlmodel import Session, select
 
-from . import daytime
+from . import daytime, editorials
 from .config import get_settings
 from .db import get_engine, init_db, session_scope
 from .models import (
@@ -450,6 +450,20 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
         len(errors),
         total,
     )
+
+    # 题解到点就公布。搭在同步任务上而不是单独一个 timer：公布只是把
+    # 两个时间戳填上，几毫秒的事，而同步每 5 分钟就跑一次，足够准。
+    #
+    # 到点判据是「当前时间 >= 该公布的时刻」，所以错过几小时也不会漏掉，
+    # 下一次唤醒会补上。
+    try:
+        with session_scope() as db:
+            changed = editorials.publish_due(db)
+        if changed:
+            logger.info("published %d editorial timestamp(s)", changed)
+    except Exception:  # noqa: BLE001 - 公布失败不能拖垮同步
+        logger.exception("publishing due editorials failed")
+
     return {
         "account_count": fetched,
         "ok_count": ok,

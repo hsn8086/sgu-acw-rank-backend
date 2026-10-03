@@ -101,6 +101,10 @@ def seed_problems(session: Session, entries: list[dict]) -> None:
                 tags_json="[]",
                 url=entry.get("url", f"https://codeforces.com/problemset/problem/{entry['key']}"),
                 solved_count=entry.get("solved_count"),
+                # 默认当成「有题面」。抽签会跳过没题面的题，而测试造的数据
+                # 都是用来验证抽签逻辑的，默认无题面的话全被筛掉。
+                # 要测「没题面不抽」的用例单独传 False。
+                has_statement=entry.get("has_statement", True),
             )
         )
     session.commit()
@@ -108,8 +112,8 @@ def seed_problems(session: Session, entries: list[dict]) -> None:
 
 #: 造数据用的比赛 id 起点。
 #:
-#: 必须落在 2024 年之前（id < 1918），否则会被「只要老题」的过滤条件筛掉。
-#: 三个档位各占一段，互不重叠，方便按档位断言。
+#: 必须落在 2024 年之前（id < 1918），否则会被「只要 2024 年之前的题」
+#: 这个过滤条件筛掉。三个档位各占一段，互不重叠，方便按档位断言。
 _BASE_CONTEST_ID = {"800-1000": 1000, "1100-1300": 1100, "1400-1600": 1200}
 
 
@@ -193,6 +197,8 @@ def test_candidates_skip_problems_from_2024_onwards(env):
     """2024 年及以后的题不进池子。
 
     分界线是 contest id：2024-01-01 之前最大 1917，之后最小 1918。
+
+    不要新题是因为它们的 rating 还在形成中，标出来的分与实际难度对不上。
     """
     from app import daily
     from app.db import get_engine
@@ -259,6 +265,28 @@ def test_candidates_are_split_into_the_right_bands(env):
     assert [c.key for c in pools["800-1000"]] == ["1000A", "1000B"]
     assert [c.key for c in pools["1100-1300"]] == ["1000D", "1000E"]
     assert [c.key for c in pools["1400-1600"]] == ["1000G", "1000H"]
+
+
+def test_candidates_skip_problems_without_statement(env):
+    """没题面的题不进池子。
+
+    题解要靠题面才能写，而题面索引来自离线数据集，覆盖到某个时间点为止。
+    CF 后来的新题不在里面——抽到就只能写「生成失败」。
+    """
+    from app import daily
+    from app.db import get_engine
+
+    with Session(get_engine()) as session:
+        seed_problems(
+            session,
+            [
+                {"key": "1000A", "rating": 900, "solved_count": 5000, "has_statement": False},
+                {"key": "1000B", "rating": 900, "solved_count": 5000, "has_statement": True},
+            ],
+        )
+        pools = daily.load_candidates(session)
+
+    assert [c.key for c in pools["800-1000"]] == ["1000B"]
 
 
 def test_candidates_are_sorted_numerically_not_lexically(env):

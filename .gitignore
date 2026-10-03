@@ -16,7 +16,16 @@ wheels/
 .env
 
 # 探索平台接口时留下的临时数据，不入库
+#
+# 注意：题解生成器的题面索引在 tools/generate-editorial/data/，那份要入库，
+# 所以下面用 ! 把它排除在外。
 data/
+!tools/generate-editorial/data/
+
+# pi 运行时产生的凭据与缓存。auth.json 是 pi 存 API key 的地方，
+# 现在可能是空的，但跑起来就会被写入。
+tools/generate-editorial/.pi/agent/auth.json
+tools/generate-editorial/.pi/agent/models-store.json
 
 # Tooling
 .pytest_cache/

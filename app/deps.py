@@ -92,3 +92,28 @@ def require_root(user: User = Depends(get_current_user)) -> User:
     if user.role != Role.ROOT:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要 root 权限")
     return user
+
+
+def require_editorial_secret(
+    x_editorial_secret: str | None = Header(default=None, alias="X-Editorial-Secret"),
+) -> None:
+    """Gate for ``/internal/*``: the editorial generator's shared secret.
+
+    Separate from ``require_origin_secret`` so the two credentials never stand
+    in for each other. The generator runs on the VPS next to the API and must
+    not be able to call the public API as though it were the CDN; conversely a
+    request that merely came through Cloudflare must not be able to write
+    editorials.
+
+    An unconfigured secret disables the routes rather than opening them: this
+    endpoint writes content that members read, so failing closed is the only
+    safe default.
+    """
+    expected = get_settings().editorial_secret
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="题解生成接口未启用",
+        )
+    if not x_editorial_secret or not hmac.compare_digest(x_editorial_secret, expected):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="拒绝访问")

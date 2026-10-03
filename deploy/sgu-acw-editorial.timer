@@ -1,0 +1,16 @@
+[Unit]
+Description=SGU ACW 题解生成（定时唤醒）
+Documentation=https://github.com/hsn8086/sgu-acw-rank-backend
+
+[Timer]
+# 东八区 04:30。凌晨四点换题，给半小时让 daily_problems 先落库——
+# 生成器要调 /internal/editorials/pending 拿当天的题，题目还没写进去的话
+# 它会拿到空的列表，白跑一次。
+OnCalendar=*-*-* 04:30:00 Asia/Shanghai
+# 服务停了错过的话，开机补跑一次。
+Persistent=true
+# 生成要跑几分钟，别和下一次唤醒重叠。
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

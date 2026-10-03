@@ -1,0 +1,15 @@
+{
+  "providers": {
+    "sgu": {
+      "baseUrl": "http://127.0.0.1:3425/v1",
+      "api": "openai-completions",
+      "apiKey": "$SGU_ACW_LLM_KEY",
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "name": "DeepSeek Flash"
+        }
+      ]
+    }
+  }
+}

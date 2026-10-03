@@ -23,6 +23,17 @@ rating 是拿几十个人的成绩估出来的，误差能有好几百。这种�
 id 是 1917，之后最小是 1918。实测没有反例，比拿时间戳逐个比对简单，也
 不用为了判定去拉一遍比赛列表。
 
+**保留** ``contest_id < 1918`` 的题，即 2024 年之前的。
+
+为什么不要新的：新比赛的参赛人数和 rating 分布还在形成中，标出来的分
+与实际难度对不上。老题经过足够多人的检验，标多少就是多少。
+
+**还要有题面**
+
+``problem_cache.has_statement`` 为假的题不进池子。题面存在离线索引里
+（生成题解要用），覆盖到某个时间点为止。
+用 ``python -m app.import_statements`` 从索引回填这个字段。
+
 **抽签怎么做到「同一天同一套」**
 
 候选池按题目 key 排序固定顺序，再用 ``day`` 当种子做确定性洗牌，取头三道。
@@ -48,6 +59,7 @@ from .models import (
     Account,
     DailyProblem,
     DailyProblemSolve,
+    Editorial,
     ProblemCache,
     SolvedSnapshot,
     utcnow,
@@ -149,11 +161,24 @@ def load_candidates(session: Session) -> dict[str, list[Candidate]]:
             continue
 
         contest_id = _contest_id(row.key)
+        # 只要 2024 年之前的。
+        #
+        # 2024 年之后的题 rating 掉价严重：新比赛的参赛人数和 rating 分布
+        # 还在形成中，标出来的分跟实际难度对不上。老题经过了足够多人的检验，
+        # 标多少就是多少。
         if contest_id is None or contest_id >= CONTESTS_FROM_2024:
             continue
 
         solved = row.solved_count
         if solved is None or solved < MIN_SOLVED_COUNT:
+            continue
+
+        # 没题面的题不抽。
+        #
+        # 题解要靠题面才能写，而题面索引来自一份离线数据集，覆盖到某个
+        # 时间点为止。CF 持续出新比赛，新题不在索引里。抽到这种题的话，
+        # 当天就只能写「生成失败」——不如一开始就不抽。
+        if not row.has_statement:
             continue
 
         for band, (low, high) in BANDS.items():
@@ -243,6 +268,23 @@ def ensure_daily(
         return _sorted_by_band(existing)
 
     if force:
+        # 先把挂在旧题上的题解删掉。
+        #
+        # 题解的外键指向 daily_problems，不先删的话重抽会撞上外键约束
+        # 直接 500。而重抽本来就是要换掉这一天的题，旧的题解对新题没有
+        # 意义——留着还会因为 key 对不上而在接口里串味。
+        #
+        # 必须显式 flush：SQLAlchemy 的 unit of work 不保证按 add/delete
+        # 的先后顺序发语句，不 flush 的话它可能先删 daily_problems，
+        # 那就又撞上外键了。
+        old_ids = [row.id for row in existing if row.id]
+        if old_ids:
+            for editorial in session.exec(
+                select(Editorial).where(Editorial.daily_problem_id.in_(old_ids))  # type: ignore[attr-defined]
+            ).all():
+                session.delete(editorial)
+            session.flush()
+
         for row in existing:
             session.delete(row)
         session.commit()

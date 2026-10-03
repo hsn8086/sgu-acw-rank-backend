@@ -557,6 +557,16 @@ class ProblemCache(SQLModel, table=True):
 
     #: 抓不到信息时记下原因，前端显示成「信息缺失」而不是空着。
     missing_reason: str = Field(default="", max_length=200)
+
+    #: 题面是否已收录。
+    #:
+    #: 题面存在一份离线索引里（生成题解要用），来源是 CPRet 数据集，
+    #: 只覆盖到某个时间点。CF 持续出新比赛，新题会没有题面。
+    #:
+    #: 每日一题抽签要跳过这些题：抽到一道没题面的题，当天就只能写「生成
+    #: 失败」，与其事后报错，不如一开始不抽。
+    has_statement: bool = Field(default=False)
+
     fetched_at: datetime = Field(default_factory=utcnow)
 
 
@@ -597,6 +607,81 @@ class DailyProblem(SQLModel, table=True):
     seed: str = Field(default="", max_length=64)
 
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class EditorialStatus:
+    """题解的生命周期。
+
+    生成在凌晨四点抽完题之后，公布在晚上八点。中间那段是给人工过一眼的
+    窗口——AI 写的东西偶尔会跑偏，直接对成员可见风险太大。
+    """
+
+    PENDING = "pending"  # 还没生成（或正在生成）
+    DRAFT = "draft"  # 生成好了，还没到公布时间
+    PUBLISHED = "published"  # 已公布
+    FAILED = "failed"  # 生成失败，原因在 error 里
+
+
+class Editorial(SQLModel, table=True):
+    """每日一题的题解。一道题一条。
+
+    **为什么按题存而不是按天存**：
+
+    一天三道题，分属不同难度档。按天存的话，三篇题解挤在一个字段里，
+    前端要么整块显示要么整块隐藏，没法按题展开。按题存则每道题各自
+    有状态，一道生成失败不影响另外两道。
+
+    **为什么草稿和公布分开**：
+
+    ``status`` 和 ``published_at`` 是两个概念。生成完就是 draft，到了晚上
+    八点（或管理员手动放行）才变 published。这样即使生成质量有问题，
+    也能在公布前拦下来，而不是靠事后删帖。
+
+    **hint 和题解分开存**：
+
+    hint 是一句话提示，题解是完整推导。前端可以只显示 hint，让人自己想，
+    想不出来再看题解。存成两个字段而不是混在正文里，是为了这个折叠行为
+    不需要解析 markdown。
+    """
+
+    __tablename__ = "editorials"
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    #: 对应的每日一题。一道题只有一篇题解。
+    daily_problem_id: int = Field(foreign_key="daily_problems.id", index=True, unique=True)
+
+    #: 冗余一份日期和题号，查询时不用再 join。
+    day: str = Field(max_length=10, index=True)
+    platform: str = Field(max_length=16, default="codeforces")
+    key: str = Field(max_length=128, index=True)
+
+    status: str = Field(default=EditorialStatus.PENDING, max_length=16, index=True)
+
+    #: 一句话提示，按由浅入深排列。Markdown。
+    hints: str = Field(default="")
+    #: 完整题解。Markdown + LaTeX。
+    body: str = Field(default="")
+
+    #: 参考代码。键是语言标识（cpp17 / py3 / java17）。
+    code_cpp17: str = Field(default="")
+    code_py3: str = Field(default="")
+    code_java17: str = Field(default="")
+
+    #: 生成用的模型，排查用。
+    model: str = Field(default="", max_length=64)
+    #: 失败原因，直接显示给管理员。
+    error: str = Field(default="", max_length=500)
+
+    #: 生成完成的时刻。
+    generated_at: datetime | None = Field(default=None)
+    #: 对成员可见的时刻。代码在次日凌晨归档时才填。
+    published_at: datetime | None = Field(default=None)
+    #: 参考代码对成员可见的时刻。
+    code_published_at: datetime | None = Field(default=None)
+
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class ProblemList(SQLModel, table=True):
