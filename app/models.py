@@ -222,7 +222,7 @@ class RefreshQuota(SQLModel, table=True):
     """手动刷新练习数据的额度。
 
     抓取本身是定时任务在做，成员不需要操心。但有人刚打完一场想立刻看到
-    数字变化，所以给一个手动刷新的口子，每周三次，防止有人反复点。
+    数字变化，所以给一个手动刷新的口子，每周七次，防止有人反复点。
 
     按周记账：``week_start`` 是那一周的周一（东八区），换周自然重置，
     不需要额外的清理任务。
@@ -238,7 +238,7 @@ class RefreshQuota(SQLModel, table=True):
     used: int = Field(default=0)
 
     #: 每周可用的次数。标成 ClassVar，否则 Pydantic 会把它当成表字段。
-    WEEKLY_LIMIT: ClassVar[int] = 3
+    WEEKLY_LIMIT: ClassVar[int] = 7
 
     @property
     def remaining(self) -> int:
@@ -372,7 +372,7 @@ class Account(SQLModel, table=True):
         间隔就翻一倍，不用记表格。
 
         七天封顶是个折中：再慢就没人看得到变化了。真到了谷值还想立刻更新，
-        成员可以手动刷新（每周三次）。
+        成员可以手动刷新（每周七次）。
         """
         reference = self.last_active_at or self.created_at
         idle_days = max(0.0, (now - reference).total_seconds() / DAY_SECONDS)

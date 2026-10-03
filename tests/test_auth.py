@@ -830,7 +830,7 @@ def test_unbinding_account_removes_its_progress(client, root_client):
 
 
 def test_manual_refresh_quota(client, root_client):
-    """手动刷新每周三次，用完返回 429。"""
+    """手动刷新每周七次，用完返回 429。"""
     from unittest.mock import patch
 
     invite = _make_invite(root_client)
@@ -859,14 +859,14 @@ def test_manual_refresh_quota(client, root_client):
         db.commit()
 
     quota = client.get("/api/practice/quota").json()
-    assert quota["limit"] == 3
-    assert quota["remaining"] == 3
+    assert quota["limit"] == 7
+    assert quota["remaining"] == 7
 
     with (
         patch("app.routers.practice.sync_account", return_value=(True, "ok", 0)),
         patch("app.routers.practice.sync_rating", return_value=(True, "ok")),
     ):
-        for expected in (2, 1, 0):
+        for expected in (6, 5, 4, 3, 2, 1, 0):
             body = client.post("/api/practice/refresh").json()
             assert body["remaining"] == expected
 

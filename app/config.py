@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     # 而活跃度是连续变化的。
     #
     # 七天封顶是折中，再慢就没人看得到变化。真到了谷值还想立刻更新，
-    # 成员可以手动刷新（每周三次）。
+    # 成员可以手动刷新（每周七次）。
     sync_interval_base_minutes: int = 15
     sync_interval_cap_minutes: int = 7 * 24 * 60
 
