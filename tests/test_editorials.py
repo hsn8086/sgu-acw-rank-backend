@@ -208,6 +208,12 @@ def test_publish_due_fills_timestamp(db):
     at_publish = editorials.publish_at_for(problem.day) + timedelta(minutes=1)
     assert editorials.publish_due(db, now=at_publish) == 1
 
+    # status 要跟着变成 published。它和 published_at 是两个字段，但描述的
+    # 是同一件事——只改时间戳的话管理页会一直显示「草稿」。
+    row = editorials.get_for_problem(db, problem.id or 0)
+    assert row.status == EditorialStatus.PUBLISHED
+    assert row.published_at is not None
+
     # 再跑一次不该重复计数。
     assert editorials.publish_due(db, now=at_publish) == 0
 
@@ -681,11 +687,14 @@ def test_admin_publish_and_unpublish(root_client, db):
     db.expire_all()
     fresh = editorials.get_for_problem(db, problem.id or 0)
     assert fresh.published_at is not None
+    assert fresh.status == EditorialStatus.PUBLISHED
 
     assert root_client.post(f"/api/admin/editorials/{row.id}/unpublish").status_code == 200
     db.expire_all()
     fresh = editorials.get_for_problem(db, problem.id or 0)
     assert fresh.published_at is None
+    # 收回后回到草稿。
+    assert fresh.status == EditorialStatus.DRAFT
 
 
 def test_admin_delete(root_client, db):
@@ -734,13 +743,18 @@ def test_admin_missing_lists_past_problems(root_client, db):
     assert root_client.get("/api/admin/editorials/missing").json() == []
 
 
-def test_admin_missing_excludes_today(root_client, db):
-    """今天的题不算「缺失」。
+def test_admin_missing_marks_today(root_client, db):
+    """今天的题要列出来，但用 is_today 标出，好和「真漏了」区分。"""
+    from datetime import date, timedelta
 
-    生成每天早上跑，在那之前今天的题本来就还没题解。列出来会让管理员
-    以为出问题了。
-    """
     from app import daily as daily_mod
 
-    _seed_problem(db, day=daily_mod.workshop_today(), key="1000A")
-    assert root_client.get("/api/admin/editorials/missing").json() == []
+    today = daily_mod.workshop_today()
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    _seed_problem(db, day=today, key="1000A")
+    _seed_problem(db, day=yesterday, key="1001A")
+
+    body = root_client.get("/api/admin/editorials/missing").json()
+    by_key = {item["key"]: item for item in body}
+    assert by_key["1000A"]["is_today"] is True
+    assert by_key["1001A"]["is_today"] is False

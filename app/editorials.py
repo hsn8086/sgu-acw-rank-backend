@@ -181,6 +181,10 @@ def publish_due(session: Session, *, now: datetime | None = None) -> int:
     for row in drafts:
         if row.published_at is None and moment >= publish_at_for(row.day):
             row.published_at = moment
+            # status 也要跟着走。它和 published_at 是两个字段，但描述的是
+            # 同一件事——只改时间戳的话，管理页会一直显示「草稿」，
+            # 而成员其实已经能看到了。
+            row.status = EditorialStatus.PUBLISHED
             row.updated_at = moment
             session.add(row)
             changed += 1

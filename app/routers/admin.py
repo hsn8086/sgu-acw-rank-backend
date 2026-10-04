@@ -24,6 +24,7 @@ from ..models import (
     DailyProblem,
     DailyProgress,
     Editorial,
+    EditorialStatus,
     Invite,
     ProblemCache,
     Role,
@@ -758,6 +759,8 @@ def publish_editorial(
     now = utcnow()
     if row.published_at is None:
         row.published_at = now
+    # 和 publish_due 保持一致：status 描述的就是「公布了没有」。
+    row.status = EditorialStatus.PUBLISHED
     row.updated_at = now
     db.add(row)
     db.commit()
@@ -783,6 +786,9 @@ def unpublish_editorial(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="没有这篇题解")
 
     row.published_at = None
+    # 收回后回到草稿。生成失败的不动——那不是「收回」，是没成功过。
+    if row.status == EditorialStatus.PUBLISHED:
+        row.status = EditorialStatus.DRAFT
     row.updated_at = utcnow()
     db.add(row)
     db.commit()
@@ -824,18 +830,25 @@ class MissingEditorial(BaseModel):
     name: str = ""
     rating: int | None = None
 
+    #: 是不是今天的题。
+    #:
+    #: 今天的题在生成任务跑之前本来就还没题解，那是正常的；往日的没有
+    #: 才是真漏了。前端靠这个区分显示，不然管理员会把正常情况当成故障。
+    is_today: bool = False
+
 
 @router.get("/editorials/missing", response_model=list[MissingEditorial])
 def list_missing_editorials(
     days: int = Query(default=30, ge=1, le=365, description="往前查几天"),
     db: Session = Depends(get_session),
 ) -> list[MissingEditorial]:
-    """往日里哪些题还没有题解。
+    """哪些题还没有题解，含今天。
 
     管理员靠这个知道生成任务漏了哪些。
 
-    **不含今天。** 生成在每天早上跑，在那之前今天的题本来就还没题解——
-    列出来会让管理员以为出问题了。要看的只是「往日该有却没有」的。
+    今天的题也列出来——不然管理员在生成之前完全看不到今天出了什么题。
+    用 ``is_today`` 标出来让前端分开显示：今天的还没到生成时间是正常的，
+    往日的没有才是真漏了。
     """
     from .. import daily as daily_mod
 
@@ -844,7 +857,6 @@ def list_missing_editorials(
     problems = db.exec(
         select(DailyProblem)
         .where(DailyProblem.day >= cutoff)  # type: ignore[operator]
-        .where(DailyProblem.day < today)  # type: ignore[operator]
         .order_by(DailyProblem.day.desc(), DailyProblem.id.desc())  # type: ignore[attr-defined]
     ).all()
     if not problems:
@@ -873,6 +885,7 @@ def list_missing_editorials(
             key=p.key,
             name=cache[p.key].name if p.key in cache else "",
             rating=cache[p.key].rating if p.key in cache else None,
+            is_today=p.day == today,
         )
         for p in problems
         if (p.id or 0) not in have
