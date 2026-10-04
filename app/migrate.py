@@ -135,16 +135,62 @@ def _fix_nowcoder_keys(*, check_only: bool = False) -> int:
     return fixed
 
 
+def _rename_columns(*, check_only: bool = False) -> int:
+    """把改过名字的列迁过去。
+
+    ``missing_columns`` 只处理加列，不会发现「模型里叫 A、库里叫 B」的情况——
+    那种情况下它会以为 A 不存在，试图 ALTER TABLE ADD COLUMN。如果 B 上
+    有 NOT NULL 约束就会失败，没有的话更糟：加出一个空列，旧数据全丢。
+
+    SQLite 3.25+ 支持 RENAME COLUMN，是元数据操作，不重写表。生产用的是
+    3.45，可以放心用。
+
+    **只在旧名存在、新名不存在时改**。两个都在说明改过了，什么都不做；
+    只有新名则说明是新建的库，也不用管。
+    """
+    from sqlalchemy import inspect, text
+
+    # (表, 旧列名, 新列名)
+    RENAMES: list[tuple[str, str, str]] = [
+        # 题解里的 C++ 代码从 17 提到 20（ranges、结构化绑定），
+        # 字段名一直没跟着改，容易误导。
+        ("editorials", "code_cpp17", "code_cpp20"),
+    ]
+
+    inspector = inspect(get_engine())
+    changed = 0
+    with get_engine().begin() as connection:
+        for table, old, new in RENAMES:
+            if not inspector.has_table(table):
+                continue
+            columns = {col["name"] for col in inspector.get_columns(table)}
+            if old not in columns or new in columns:
+                continue
+            if check_only:
+                logger.warning("%s.%s 需要改名为 %s", table, old, new)
+                changed += 1
+                continue
+            connection.execute(
+                text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}"')
+            )
+            logger.info("改名：%s.%s -> %s", table, old, new)
+            changed += 1
+    return changed
+
+
 def run_migration(*, check_only: bool = False) -> int:
     """补列。返回补了几列。"""
     init_db()  # 先把缺的表建出来
+    # 改名要在补列之前跑：改完之后模型和库对得上，missing_columns 才不会
+    # 把「名字不同」误判成「缺列」。
+    renamed = _rename_columns(check_only=check_only)
 
     fixed = _fix_nowcoder_keys(check_only=check_only)
 
     pending = missing_columns()
     if not pending:
         logger.info("没有缺的列")
-        return fixed
+        return renamed + fixed
 
     total = 0
     for table_name, columns in pending.items():
@@ -163,7 +209,7 @@ def run_migration(*, check_only: bool = False) -> int:
                 connection.exec_driver_sql(statement)
             total += 1
 
-    return total + fixed
+    return renamed + total + fixed
 
 
 def main() -> None:

@@ -663,8 +663,11 @@ class Editorial(SQLModel, table=True):
     #: 完整题解。Markdown + LaTeX。
     body: str = Field(default="")
 
-    #: 参考代码。键是语言标识（cpp17 / py3 / java17）。
-    code_cpp17: str = Field(default="")
+    #: 参考代码。键是语言标识（cpp20 / py3 / java17）。
+    #:
+    #: C++ 用 20 标准：题解里会写 ranges::sort、结构化绑定这些现代写法，
+    #: 17 编译不过。字段名一度叫 code_cpp17，内容是 20，容易误导。
+    code_cpp20: str = Field(default="")
     code_py3: str = Field(default="")
     code_java17: str = Field(default="")
 

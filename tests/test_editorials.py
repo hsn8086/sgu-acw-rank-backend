@@ -18,7 +18,7 @@ SECRET = "test-editorial-secret"
 #: 够长，能过 MIN_BODY_CHARS。
 BODY = "先观察这个式子的结构。\n\n" + "推导过程写在这里。" * 40
 CODE = {
-    "cpp17": "#include <bits/stdc++.h>\nint main(){return 0;}",
+    "cpp20": "#include <bits/stdc++.h>\nint main(){return 0;}",
     "py3": "print(0)",
     "java17": "class Main{public static void main(String[] a){}}",
 }
@@ -251,7 +251,7 @@ def test_missing_language_rejected(db):
             key=problem.key,
             hints="",
             body=BODY,
-            code={"cpp17": CODE["cpp17"]},
+            code={"cpp20": CODE["cpp20"]},
         )
 
 
@@ -666,7 +666,7 @@ def test_admin_edit_code(root_client, db):
     assert response.status_code == 200
     assert response.json()["code"]["py3"] == "print(42)"
     # 其他语言不动。
-    assert response.json()["code"]["cpp17"] == CODE["cpp17"]
+    assert response.json()["code"]["cpp20"] == CODE["cpp20"]
 
 
 def test_admin_publish_and_unpublish(root_client, db):

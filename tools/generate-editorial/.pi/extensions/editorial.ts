@@ -67,7 +67,7 @@ type LangSpec = {
 };
 
 const LANGS: Record<string, LangSpec> = {
-  cpp17: {
+  cpp20: {
     file: "main.cpp",
     // C++20：题解里用 ranges::sort、结构化绑定这些现代写法，
     // C++17 编译不过。提交时也要选 GNU C++20。
@@ -263,7 +263,7 @@ export default function (pi: ExtensionAPI) {
         "完整题解正文，Markdown + LaTeX（行内 $x$，独立公式 $$...$$）。" +
         "要讲清思路怎么来的、为什么这样做是对的、复杂度是多少。至少 200 字符。",
     }),
-    code_cpp17: Type.String({ description: "C++17 完整可编译代码" }),
+    code_cpp20: Type.String({ description: "C++20 完整可编译代码" }),
     code_py3: Type.String({ description: "Python 3 完整代码" }),
     code_java17: Type.String({ description: "Java 17 完整代码（类名必须是 Main）" }),
   });
@@ -295,7 +295,7 @@ export default function (pi: ExtensionAPI) {
         hints: params.hints ?? "",
         body: params.body,
         code: {
-          cpp17: params.code_cpp17,
+          cpp20: params.code_cpp20,
           py3: params.code_py3,
           java17: params.code_java17,
         },
@@ -356,7 +356,7 @@ export default function (pi: ExtensionAPI) {
 
   const VerifyParams = Type.Object({
     language: Type.String({
-      description: "语言：cpp17 / py3 / java17",
+      description: "语言：cpp20 / py3 / java17",
     }),
     source: Type.String({ description: "要验证的完整源代码" }),
     stdin: Type.Optional(

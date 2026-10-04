@@ -617,7 +617,7 @@ def _admin_editorial(row: Editorial, name: str, rating: int | None) -> AdminEdit
         hints=row.hints,
         body=row.body,
         code={
-            "cpp17": row.code_cpp17,
+            "cpp20": row.code_cpp20,
             "py3": row.code_py3,
             "java17": row.code_java17,
         },

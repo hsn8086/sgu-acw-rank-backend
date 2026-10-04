@@ -49,7 +49,7 @@ PUBLISH_HOUR = 20
 
 #: 支持的语言。键是数据库字段后缀，值是显示名。
 LANGUAGES: dict[str, str] = {
-    "cpp17": "C++17",
+    "cpp20": "C++20",
     "py3": "Python 3",
     "java17": "Java 17",
 }
@@ -123,7 +123,7 @@ def upsert(
 
     row.hints = hints.strip()
     row.body = body
-    row.code_cpp17 = code["cpp17"].strip()
+    row.code_cpp20 = code["cpp20"].strip()
     row.code_py3 = code["py3"].strip()
     row.code_java17 = code["java17"].strip()
     row.model = model
@@ -238,7 +238,7 @@ def public_view(row: Editorial, *, now: datetime | None = None) -> dict:
         # 判断，恒为 true。
         "code_available": True,
         "code": {
-            "cpp17": row.code_cpp17,
+            "cpp20": row.code_cpp20,
             "py3": row.code_py3,
             "java17": row.code_java17,
         },
