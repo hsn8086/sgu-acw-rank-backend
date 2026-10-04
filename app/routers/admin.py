@@ -7,21 +7,25 @@ like promoting someone to root or touching a root account.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, func, select
 
-from .. import academic
+from .. import academic, editorials
 from ..cleanup import delete_user_accounts, delete_user_references
 from ..db import get_session
 from ..deps import require_admin
 from ..models import (
     Account,
+    DailyProblem,
     DailyProgress,
+    Editorial,
     Invite,
+    ProblemCache,
     Role,
     SolvedSnapshot,
     User,
@@ -551,3 +555,325 @@ def get_member_detail(
         last_practice_date=last_date,
         failing_accounts=sum(1 for d in details if d.consecutive_failures > 0),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Editorials
+# --------------------------------------------------------------------------- #
+
+
+class AdminEditorial(BaseModel):
+    """管理员看到的题解。比成员多几个字段：状态、模型、失败原因。"""
+
+    id: int
+    daily_problem_id: int
+    day: str
+    platform: str
+    key: str
+    name: str = ""
+    rating: int | None = None
+
+    status: str
+    error: str = ""
+    model: str = ""
+
+    hints: str = ""
+    body: str = ""
+    code: dict[str, str] = Field(default_factory=dict)
+
+    generated_at: datetime | None = None
+    published_at: datetime | None = None
+
+    #: 算出来的公布时刻，前端用来显示「几点公布」。
+    publish_at: datetime
+
+
+class AdminEditorialPage(BaseModel):
+    items: list[AdminEditorial] = Field(default_factory=list)
+    total: int = 0
+
+
+class EditorialPatch(BaseModel):
+    """改题解。只传要改的字段。"""
+
+    hints: str | None = None
+    body: str | None = None
+    code: dict[str, str] | None = None
+
+
+def _admin_editorial(row: Editorial, name: str, rating: int | None) -> AdminEditorial:
+    return AdminEditorial(
+        id=row.id or 0,
+        daily_problem_id=row.daily_problem_id,
+        day=row.day,
+        platform=row.platform,
+        key=row.key,
+        name=name,
+        rating=rating,
+        status=row.status,
+        error=row.error,
+        model=row.model,
+        hints=row.hints,
+        body=row.body,
+        code={
+            "cpp17": row.code_cpp17,
+            "py3": row.code_py3,
+            "java17": row.code_java17,
+        },
+        generated_at=row.generated_at,
+        published_at=row.published_at,
+        publish_at=editorials.publish_at_for(row.day),
+    )
+
+
+@router.get("/editorials", response_model=AdminEditorialPage)
+def list_editorials(
+    day: str | None = Query(default=None, description="按日期筛，不传则全部"),
+    status_filter: str | None = Query(default=None, alias="status"),
+    q: str | None = Query(default=None, description="题号或题名关键词"),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_session),
+) -> AdminEditorialPage:
+    """题解列表。
+
+    不按日期筛时返回全部，从新到旧。管理员要能一眼看到哪些没生成、
+    哪些生成失败了。
+    """
+    statement = select(Editorial)
+    if day:
+        statement = statement.where(Editorial.day == day)
+    if status_filter:
+        statement = statement.where(Editorial.status == status_filter)
+    if q:
+        like = f"%{q}%"
+        statement = statement.where(
+            or_(Editorial.key.ilike(like), Editorial.day.ilike(like))  # type: ignore[attr-defined]
+        )
+
+    rows = db.exec(statement.order_by(Editorial.day.desc(), Editorial.id.desc())).all()  # type: ignore[attr-defined]
+    total = len(rows)
+    page = rows[offset : offset + limit]
+
+    # 一次把题目元信息查出来，避免逐条查库。
+    keys = [row.key for row in page]
+    cache: dict[str, ProblemCache] = {}
+    if keys:
+        for item in db.exec(
+            select(ProblemCache).where(
+                ProblemCache.platform == "codeforces",  # type: ignore[arg-type]
+                ProblemCache.key.in_(keys),  # type: ignore[attr-defined]
+            )
+        ).all():
+            cache[item.key] = item
+
+    return AdminEditorialPage(
+        items=[
+            _admin_editorial(
+                row,
+                cache[row.key].name if row.key in cache else "",
+                cache[row.key].rating if row.key in cache else None,
+            )
+            for row in page
+        ],
+        total=total,
+    )
+
+
+@router.patch("/editorials/{editorial_id}", response_model=AdminEditorial)
+def update_editorial(
+    editorial_id: int,
+    payload: EditorialPatch,
+    db: Session = Depends(get_session),
+) -> AdminEditorial:
+    """改题解的正文、hint 或代码。
+
+    改完不重置公布状态——已经对成员可见的题解，改错字不该让它消失。
+    校验规则和生成器走同一套（``editorials.upsert`` 里的那几个），
+    否则管理员能存进生成器存不进的东西。
+    """
+    row = db.get(Editorial, editorial_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="没有这篇题解")
+
+    if payload.body is not None:
+        body = payload.body.strip()
+        if len(body) < editorials.MIN_BODY_CHARS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"正文太短（{len(body)} 字符，至少 {editorials.MIN_BODY_CHARS}）",
+            )
+        if len(body) > editorials.MAX_BODY_CHARS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"正文太长（{len(body)} 字符，最多 {editorials.MAX_BODY_CHARS}）",
+            )
+        row.body = body
+
+    if payload.hints is not None:
+        row.hints = payload.hints.strip()
+
+    if payload.code is not None:
+        for lang in payload.code:
+            if lang not in editorials.LANGUAGES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"不支持的语言：{lang}",
+                )
+        for lang in editorials.LANGUAGES:
+            source = payload.code.get(lang)
+            if source is None:
+                continue
+            if len(source) > editorials.MAX_CODE_CHARS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"{lang} 的代码太长（{len(source)} 字符）",
+                )
+            setattr(row, f"code_{lang}", source.strip())
+
+    row.updated_at = utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    cache = db.exec(
+        select(ProblemCache).where(
+            ProblemCache.platform == "codeforces",  # type: ignore[arg-type]
+            ProblemCache.key == row.key,
+        )
+    ).first()
+    return _admin_editorial(row, cache.name if cache else "", cache.rating if cache else None)
+
+
+@router.post("/editorials/{editorial_id}/publish", response_model=AdminEditorial)
+def publish_editorial(
+    editorial_id: int,
+    db: Session = Depends(get_session),
+) -> AdminEditorial:
+    """立刻公布一篇题解，不等 20:00。"""
+    row = db.get(Editorial, editorial_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="没有这篇题解")
+
+    now = utcnow()
+    if row.published_at is None:
+        row.published_at = now
+    row.updated_at = now
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    cache = db.exec(
+        select(ProblemCache).where(
+            ProblemCache.platform == "codeforces",  # type: ignore[arg-type]
+            ProblemCache.key == row.key,
+        )
+    ).first()
+    return _admin_editorial(row, cache.name if cache else "", cache.rating if cache else None)
+
+
+@router.post("/editorials/{editorial_id}/unpublish", response_model=AdminEditorial)
+def unpublish_editorial(
+    editorial_id: int,
+    db: Session = Depends(get_session),
+) -> AdminEditorial:
+    """收回一篇题解，让成员看不到。"""
+    row = db.get(Editorial, editorial_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="没有这篇题解")
+
+    row.published_at = None
+    row.updated_at = utcnow()
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    cache = db.exec(
+        select(ProblemCache).where(
+            ProblemCache.platform == "codeforces",  # type: ignore[arg-type]
+            ProblemCache.key == row.key,
+        )
+    ).first()
+    return _admin_editorial(row, cache.name if cache else "", cache.rating if cache else None)
+
+
+@router.delete("/editorials/{editorial_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_editorial(
+    editorial_id: int,
+    db: Session = Depends(get_session),
+) -> Response:
+    """删掉一篇题解。
+
+    删掉之后那道题会回到「还没生成」，下次生成任务会重写。
+    """
+    row = db.get(Editorial, editorial_id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="没有这篇题解")
+    db.delete(row)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class MissingEditorial(BaseModel):
+    """还没生成题解的题。"""
+
+    daily_problem_id: int
+    day: str
+    band: str
+    key: str
+    name: str = ""
+    rating: int | None = None
+
+
+@router.get("/editorials/missing", response_model=list[MissingEditorial])
+def list_missing_editorials(
+    days: int = Query(default=30, ge=1, le=365, description="往前查几天"),
+    db: Session = Depends(get_session),
+) -> list[MissingEditorial]:
+    """往日里哪些题还没有题解。
+
+    管理员靠这个知道生成任务漏了哪些。
+
+    **不含今天。** 生成在每天早上跑，在那之前今天的题本来就还没题解——
+    列出来会让管理员以为出问题了。要看的只是「往日该有却没有」的。
+    """
+    from .. import daily as daily_mod
+
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    today = daily_mod.workshop_today()
+    problems = db.exec(
+        select(DailyProblem)
+        .where(DailyProblem.day >= cutoff)  # type: ignore[operator]
+        .where(DailyProblem.day < today)  # type: ignore[operator]
+        .order_by(DailyProblem.day.desc(), DailyProblem.id.desc())  # type: ignore[attr-defined]
+    ).all()
+    if not problems:
+        return []
+
+    have = {
+        row.daily_problem_id
+        for row in db.exec(select(Editorial)).all()
+    }
+
+    keys = [p.key for p in problems]
+    cache: dict[str, ProblemCache] = {}
+    for item in db.exec(
+        select(ProblemCache).where(
+            ProblemCache.platform == "codeforces",  # type: ignore[arg-type]
+            ProblemCache.key.in_(keys),  # type: ignore[attr-defined]
+        )
+    ).all():
+        cache[item.key] = item
+
+    return [
+        MissingEditorial(
+            daily_problem_id=p.id or 0,
+            day=p.day,
+            band=p.band,
+            key=p.key,
+            name=cache[p.key].name if p.key in cache else "",
+            rating=cache[p.key].rating if p.key in cache else None,
+        )
+        for p in problems
+        if (p.id or 0) not in have
+    ]

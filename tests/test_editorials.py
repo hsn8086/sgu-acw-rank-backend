@@ -102,14 +102,10 @@ def _seed_problem(
 # --------------------------------------------------------------------------- #
 
 
-def test_publish_and_code_times_are_a_day_apart():
-    """题解当晚 8 点，代码次日凌晨 4 点。"""
+def test_publish_time():
+    """题解当天 20:00 公布。正文和代码一起放。"""
     publish = editorials.publish_at_for("2026-03-10")
-    code = editorials.code_publish_at_for("2026-03-10")
-
     assert (publish.hour, publish.minute) == (20, 0)
-    assert (code.hour, code.minute) == (4, 0)
-    assert code.date() == (publish + timedelta(days=1)).date()
 
 
 def test_draft_hidden_until_publish(db):
@@ -137,15 +133,17 @@ def test_draft_hidden_until_publish(db):
     assert "body" not in view
     assert "code" not in view
 
-    # 公布时刻之后。
+    # 公布时刻之后。正文和代码一起可见。
     after = editorials.publish_at_for(problem.day) + timedelta(minutes=1)
     view = editorials.public_view(row, now=after)
     assert view["available"] is True
     assert view["body"] == BODY
+    assert view["code_available"] is True
+    assert view["code"]["py3"] == CODE["py3"]
 
 
-def test_code_hidden_after_editorial_published(db):
-    """题解公布后、次日 4 点前，代码仍然不可见。"""
+def test_manual_publish_releases_before_time(db):
+    """管理员手动放行后，不用等到 20:00 就能看。"""
     problem = _seed_problem(db, day="2026-03-10")
     editorials.upsert(
         db,
@@ -160,26 +158,36 @@ def test_code_hidden_after_editorial_published(db):
     row = editorials.get_for_problem(db, problem.id or 0)
     assert row is not None
 
-    # 题解已公布（模拟定时任务已经填过时间戳）。
-    row.published_at = editorials.publish_at_for(problem.day)
+    before = editorials.publish_at_for(problem.day) - timedelta(hours=6)
+    assert editorials.public_view(row, now=before)["available"] is False
+
+    # 手动填上公布时间。
+    row.published_at = before
     db.add(row)
     db.commit()
 
-    at_publish = editorials.publish_at_for(problem.day) + timedelta(minutes=1)
-    view = editorials.public_view(row, now=at_publish)
+    view = editorials.public_view(row, now=before)
     assert view["available"] is True
-    assert view["code_available"] is False
-    assert view["code"] == {}
-
-    # 代码到点。
-    at_code = editorials.code_publish_at_for(problem.day) + timedelta(minutes=1)
-    view = editorials.public_view(row, now=at_code)
     assert view["code_available"] is True
-    assert view["code"]["py3"] == CODE["py3"]
 
 
-def test_publish_due_fills_timestamps(db):
-    """到点后定时任务把两个时间戳填上。"""
+def test_failed_editorial_stays_hidden(db):
+    """生成失败的，时间到了也不该当成可读——那是空白页。"""
+    problem = _seed_problem(db, day="2026-03-10")
+    row = editorials.mark_failed(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        error="模型超时",
+    )
+    after = editorials.publish_at_for(problem.day) + timedelta(hours=1)
+    assert editorials.public_view(row, now=after)["available"] is False
+
+
+def test_publish_due_fills_timestamp(db):
+    """到点后定时任务把公布时间填上。"""
     problem = _seed_problem(db, day="2026-03-10")
     editorials.upsert(
         db,
@@ -200,44 +208,8 @@ def test_publish_due_fills_timestamps(db):
     at_publish = editorials.publish_at_for(problem.day) + timedelta(minutes=1)
     assert editorials.publish_due(db, now=at_publish) == 1
 
-    # 到代码点。
-    at_code = editorials.code_publish_at_for(problem.day) + timedelta(minutes=1)
-    assert editorials.publish_due(db, now=at_code) == 1
-
     # 再跑一次不该重复计数。
-    assert editorials.publish_due(db, now=at_code) == 0
-
-
-def test_code_not_published_before_editorial(db):
-    """题解没公布时，代码也不该先露出来。
-
-    否则某天生成晚了，会出现「代码可见但题解还锁着」的怪状态。
-    """
-    problem = _seed_problem(db, day="2026-03-10")
-    editorials.upsert(
-        db,
-        daily_problem_id=problem.id or 0,
-        day=problem.day,
-        platform=problem.platform,
-        key=problem.key,
-        hints="",
-        body=BODY,
-        code=CODE,
-    )
-
-    # 时间已经过了代码点，但题解从未公布过。
-    row = editorials.get_for_problem(db, problem.id or 0)
-    assert row is not None
-    row.published_at = None
-    db.add(row)
-    db.commit()
-
-    at_code = editorials.code_publish_at_for(problem.day) + timedelta(minutes=1)
-    editorials.publish_due(db, now=at_code)
-
-    db.refresh(row)
-    assert row.published_at is not None  # 这一轮把它补上了
-    assert row.code_published_at is not None
+    assert editorials.publish_due(db, now=at_publish) == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -565,3 +537,210 @@ def test_hints_split_into_lines(db):
         row, now=editorials.publish_at_for(problem.day) + timedelta(hours=1)
     )
     assert view["hints"] == ["第一条", "第二条", "第三条"]
+
+
+# --------------------------------------------------------------------------- #
+# 管理员接口
+# --------------------------------------------------------------------------- #
+
+
+def test_admin_list_requires_admin(client, db):
+    """未登录不能看题解列表。"""
+    assert client.get("/api/admin/editorials").status_code == 401
+
+
+def test_admin_list_shows_drafts(root_client, db):
+    """管理员能看到还没公布的草稿，成员看不到。"""
+    problem = _seed_problem(db, day="2026-03-10")
+    editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        hints="提示",
+        body=BODY,
+        code=CODE,
+    )
+
+    response = root_client.get("/api/admin/editorials")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["key"] == "1000A"
+    assert item["status"] == EditorialStatus.DRAFT
+    assert item["body"] == BODY
+    # 成员接口同一时刻是不可见的。
+    assert editorials.public_view(
+        editorials.get_for_problem(db, problem.id or 0),  # type: ignore[arg-type]
+        now=editorials.publish_at_for(problem.day) - timedelta(hours=1),
+    )["available"] is False
+
+
+def test_admin_list_filters_by_day(root_client, db):
+    _seed_problem(db, day="2026-03-10", key="1000A")
+    _seed_problem(db, day="2026-03-11", key="1001A")
+    for key, day in (("1000A", "2026-03-10"), ("1001A", "2026-03-11")):
+        problem = db.exec(select(DailyProblem).where(DailyProblem.key == key)).first()
+        editorials.upsert(
+            db,
+            daily_problem_id=problem.id or 0,  # type: ignore[union-attr]
+            day=day,
+            platform="codeforces",
+            key=key,
+            hints="",
+            body=BODY,
+            code=CODE,
+        )
+
+    body = root_client.get("/api/admin/editorials?day=2026-03-10").json()
+    assert body["total"] == 1
+    assert body["items"][0]["key"] == "1000A"
+
+
+def test_admin_edit_body(root_client, db):
+    problem = _seed_problem(db, day="2026-03-10")
+    row = editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        hints="",
+        body=BODY,
+        code=CODE,
+    )
+
+    new_body = BODY + "\n\n补充一段。"
+    response = root_client.patch(
+        f"/api/admin/editorials/{row.id}", json={"body": new_body}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["body"] == new_body
+
+    db.expire_all()
+    assert editorials.get_for_problem(db, problem.id or 0).body == new_body  # type: ignore[union-attr]
+
+
+def test_admin_edit_rejects_short_body(root_client, db):
+    """校验规则和生成器走同一套。"""
+    problem = _seed_problem(db, day="2026-03-10")
+    row = editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        hints="",
+        body=BODY,
+        code=CODE,
+    )
+    response = root_client.patch(f"/api/admin/editorials/{row.id}", json={"body": "短"})
+    assert response.status_code == 400
+    assert "太短" in response.json()["detail"]
+
+
+def test_admin_edit_code(root_client, db):
+    problem = _seed_problem(db, day="2026-03-10")
+    row = editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        hints="",
+        body=BODY,
+        code=CODE,
+    )
+    response = root_client.patch(
+        f"/api/admin/editorials/{row.id}",
+        json={"code": {"py3": "print(42)"}},
+    )
+    assert response.status_code == 200
+    assert response.json()["code"]["py3"] == "print(42)"
+    # 其他语言不动。
+    assert response.json()["code"]["cpp17"] == CODE["cpp17"]
+
+
+def test_admin_publish_and_unpublish(root_client, db):
+    """手动公布后成员能看到，收回后看不到。"""
+    problem = _seed_problem(db, day="2026-03-10")
+    row = editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        hints="",
+        body=BODY,
+        code=CODE,
+    )
+
+    assert root_client.post(f"/api/admin/editorials/{row.id}/publish").status_code == 200
+    db.expire_all()
+    fresh = editorials.get_for_problem(db, problem.id or 0)
+    assert fresh.published_at is not None
+
+    assert root_client.post(f"/api/admin/editorials/{row.id}/unpublish").status_code == 200
+    db.expire_all()
+    fresh = editorials.get_for_problem(db, problem.id or 0)
+    assert fresh.published_at is None
+
+
+def test_admin_delete(root_client, db):
+    problem = _seed_problem(db, day="2026-03-10")
+    row = editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        hints="",
+        body=BODY,
+        code=CODE,
+    )
+    assert root_client.delete(f"/api/admin/editorials/{row.id}").status_code == 204
+    assert editorials.get_for_problem(db, problem.id or 0) is None
+
+
+def test_admin_missing_lists_past_problems(root_client, db):
+    """往日缺题解的题要能列出来。"""
+    from datetime import date, timedelta
+
+    from app import daily as daily_mod
+
+    today = daily_mod.workshop_today()
+    yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+    _seed_problem(db, day=yesterday, key="1000A")
+
+    body = root_client.get("/api/admin/editorials/missing").json()
+    assert len(body) == 1
+    assert body[0]["key"] == "1000A"
+    assert body[0]["day"] == yesterday
+
+    # 生成之后就不该再出现。
+    problem = db.exec(select(DailyProblem).where(DailyProblem.key == "1000A")).first()
+    editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,  # type: ignore[union-attr]
+        day=yesterday,
+        platform="codeforces",
+        key="1000A",
+        hints="",
+        body=BODY,
+        code=CODE,
+    )
+    assert root_client.get("/api/admin/editorials/missing").json() == []
+
+
+def test_admin_missing_excludes_today(root_client, db):
+    """今天的题不算「缺失」。
+
+    生成每天早上跑，在那之前今天的题本来就还没题解。列出来会让管理员
+    以为出问题了。
+    """
+    from app import daily as daily_mod
+
+    _seed_problem(db, day=daily_mod.workshop_today(), key="1000A")
+    assert root_client.get("/api/admin/editorials/missing").json() == []

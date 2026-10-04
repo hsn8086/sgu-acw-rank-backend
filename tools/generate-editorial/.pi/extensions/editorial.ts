@@ -69,7 +69,9 @@ type LangSpec = {
 const LANGS: Record<string, LangSpec> = {
   cpp17: {
     file: "main.cpp",
-    compile: [["g++", "-std=c++17", "-O2", "-o", "main", "main.cpp"]],
+    // C++20：题解里用 ranges::sort、结构化绑定这些现代写法，
+    // C++17 编译不过。提交时也要选 GNU C++20。
+    compile: [["g++", "-std=c++20", "-O2", "-o", "main", "main.cpp"]],
     run: ["./main"],
   },
   py3: {

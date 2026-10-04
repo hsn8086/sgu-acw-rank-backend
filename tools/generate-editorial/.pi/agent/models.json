@@ -1,8 +1,8 @@
 {
   "providers": {
     "sgu": {
-      "baseUrl": "http://127.0.0.1:3425/v1",
-      "api": "openai-completions",
+      "baseUrl": "https://s2a.hsn8086.com/v1",
+      "api": "openai-responses",
       "apiKey": "$SGU_ACW_LLM_KEY",
       "models": [
         {

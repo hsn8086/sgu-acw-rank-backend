@@ -29,7 +29,7 @@ pi（见 ``tools/generate_editorial``）调 LLM 生成，通过 ``POST /internal
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlmodel import Session, select
 
@@ -46,9 +46,6 @@ CST = daytime.CST
 
 #: 题解公布时刻，东八区晚上 8 点。
 PUBLISH_HOUR = 20
-
-#: 参考代码公布时刻，次日东八区凌晨 4 点——正好是下一次换题。
-CODE_PUBLISH_HOUR = 4
 
 #: 支持的语言。键是数据库字段后缀，值是显示名。
 LANGUAGES: dict[str, str] = {
@@ -68,12 +65,6 @@ def publish_at_for(day: str) -> datetime:
     """某一天的题解公布时刻：当天东八区 20:00。"""
     date = datetime.strptime(day, "%Y-%m-%d")
     return date.replace(tzinfo=CST, hour=PUBLISH_HOUR)
-
-
-def code_publish_at_for(day: str) -> datetime:
-    """某一天的参考代码公布时刻：次日东八区 04:00。"""
-    date = datetime.strptime(day, "%Y-%m-%d")
-    return (date + timedelta(days=1)).replace(tzinfo=CST, hour=CODE_PUBLISH_HOUR)
 
 
 def get_for_problem(session: Session, daily_problem_id: int) -> Editorial | None:
@@ -177,34 +168,19 @@ def mark_failed(
 def publish_due(session: Session, *, now: datetime | None = None) -> int:
     """把到点的草稿转成已公布。返回改了几篇。
 
-    由定时任务调用。两种到点：
+    由定时任务调用。只有一个到点时刻：当天 20:00。
 
-    - 题解：当天 20:00 之后
-    - 代码：次日 04:00 之后
-
-    代码单独记 ``code_published_at``，因为一篇题解的正文和代码是分两次
-    对成员可见的——不能用一个布尔量表示。
+    **正文和代码一起放。** 一开始想让代码晚一天（怕直接看到答案），
+    但那要维护两套可见性判据，还多出一条「定时任务恰好漏跑那次，
+    代码就永远锁死」的路径。复杂度换来的收益不值，改成一起放。
     """
     moment = now or datetime.now(UTC)
     changed = 0
 
     drafts = session.exec(select(Editorial).where(Editorial.status == EditorialStatus.DRAFT)).all()
     for row in drafts:
-        # 题解到点。
         if row.published_at is None and moment >= publish_at_for(row.day):
             row.published_at = moment
-            row.updated_at = moment
-            session.add(row)
-            changed += 1
-
-        # 代码到点。只有题解已经公布过的才轮到代码，避免某天生成晚了
-        # 导致代码比题解先露出来。
-        if (
-            row.code_published_at is None
-            and row.published_at is not None
-            and moment >= code_publish_at_for(row.day)
-        ):
-            row.code_published_at = moment
             row.updated_at = moment
             session.add(row)
             changed += 1
@@ -215,33 +191,30 @@ def publish_due(session: Session, *, now: datetime | None = None) -> int:
 
 
 def public_view(row: Editorial, *, now: datetime | None = None) -> dict:
-    """给成员看的形态。没到点的部分不返回。
+    """给成员看的形态。没到公布时间就不返回内容。
 
-    在服务端裁掉而不是前端隐藏：题解和代码都在响应里的话，随便打开
+    在服务端裁掉而不是前端隐藏：正文和代码都在响应里的话，随便打开
     开发者工具就能提前看到答案。
 
-    **只看时间，不看 ``published_at``**：
+    **纯时间判断，不看 ``published_at``**：
 
     一开始是「时间戳填了就可见」，但那样得靠定时任务先跑一遍，否则到了
-    20:00 而任务还没唤醒，题解就是不可见的——用户看到的是「还没出」，
-    而实际上时间早就到了。改成直接拿当前时间和公布时刻比，定时任务就
-    只剩「记录什么时候公布的」这一个职责，不再影响可见性。
+    20:00 而任务还没唤醒，题解就是不可见的——用户看到「还没出」，而实际
+    时间早就到了。改成直接拿当前时间和公布时刻比，定时任务就只剩「记录
+    什么时候公布的」这一个职责，不再影响可见性。
 
-    ``code_published_at`` 仍然要判：代码必须等题解先公布，避免某天生成
-    晚了出现「代码可见但题解还锁着」。
+    ``published_at`` 仍然保留：管理员可以手动填上它来提前放行，那是
+    ``publish_due`` 之外唯一能改变可见性的路径。
     """
     moment = now or datetime.now(UTC)
-    # 先看有没有内容。生成失败或还没生成的，时间到了也不该当成「可读」——
-    # 那样用户会看到一个空白页面，比「今晚八点」更糟。
+    # 生成失败或还没生成的，时间到了也不该当成「可读」——那样用户会看到
+    # 一个空白页面，比「今晚八点」更糟。
     has_content = row.status in (EditorialStatus.DRAFT, EditorialStatus.PUBLISHED) and bool(
         row.body.strip()
     )
-    published = has_content and moment >= publish_at_for(row.day)
-    # 代码另外要求题解已经公布过。
-    code_ready = (
-        published
-        and row.published_at is not None
-        and moment >= code_publish_at_for(row.day)
+    # 到点，或管理员已经手动放行过。
+    published = has_content and (
+        moment >= publish_at_for(row.day) or row.published_at is not None
     )
 
     if not published:
@@ -257,17 +230,14 @@ def public_view(row: Editorial, *, now: datetime | None = None) -> dict:
         "publish_at": publish_at_for(row.day),
         "hints": [line.strip() for line in row.hints.splitlines() if line.strip()],
         "body": row.body,
-        "code_available": code_ready,
-        "code_publish_at": code_publish_at_for(row.day),
-        "code": (
-            {
-                "cpp17": row.code_cpp17,
-                "py3": row.code_py3,
-                "java17": row.code_java17,
-            }
-            if code_ready
-            else {}
-        ),
+        # 代码跟着正文一起可见。字段保留是为了兼容前端的 code_available
+        # 判断，恒为 true。
+        "code_available": True,
+        "code": {
+            "cpp17": row.code_cpp17,
+            "py3": row.code_py3,
+            "java17": row.code_java17,
+        },
     }
 
 
@@ -312,10 +282,8 @@ def recent_days(session: Session, *, before: str, limit: int = 30) -> list[str]:
 
 
 __all__ = [
-    "CODE_PUBLISH_HOUR",
     "LANGUAGES",
     "PUBLISH_HOUR",
-    "code_publish_at_for",
     "daily_for_day",
     "get_for_day",
     "get_for_problem",

@@ -675,10 +675,11 @@ class Editorial(SQLModel, table=True):
 
     #: 生成完成的时刻。
     generated_at: datetime | None = Field(default=None)
-    #: 对成员可见的时刻。代码在次日凌晨归档时才填。
+    #: 对成员可见的时刻。定时任务在 20:00 填，管理员也可以手动填来提前放行。
+    #:
+    #: 可见性判断不依赖它（见 ``editorials.public_view``）——它只是
+    #: 「什么时候公布的」这条记录，以及手动提前放行的开关。
     published_at: datetime | None = Field(default=None)
-    #: 参考代码对成员可见的时刻。
-    code_published_at: datetime | None = Field(default=None)
 
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
