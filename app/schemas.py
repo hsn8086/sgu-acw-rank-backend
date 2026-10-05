@@ -42,11 +42,31 @@ class UserSelf(UserPublic):
     keeps a distinct type so fields can diverge without touching callers."""
 
 
+class AdminAccountBrief(BaseModel):
+    """成员列表里显示的平台账号摘要。
+
+    列表页只需要「绑了什么、验没验过」，用不着详情页那二十几个字段
+    （评分、抓取时间、失败次数……）。单独定义一个类型，避免列表接口
+    为了塞满 ``AdminAccountDetail`` 而多查一堆东西。
+    """
+
+    id: int
+    platform: str
+    identifier: str
+    #: 平台上的昵称，抓不到时为 None。
+    display_name: str | None = None
+    #: 验证通过的时间。为 None 表示还没验证，不计入榜单。
+    verified_at: datetime | None = None
+
+
 class UserAdmin(UserPublic):
     """Admin view: adds the admin-only note."""
 
     admin_note: str
     last_login_at: datetime | None = None
+
+    #: 这个成员绑定的平台账号。列表页直接显示，不用再点进详情。
+    accounts: list[AdminAccountBrief] = Field(default_factory=list)
 
 
 class RegisterRequest(BaseModel):

@@ -36,6 +36,7 @@ from ..models import (
 )
 from ..schemas import (
     AcademicOptions,
+    AdminAccountBrief,
     AdminAccountDetail,
     AdminCreateUserRequest,
     AdminMemberDetail,
@@ -225,8 +226,39 @@ def list_users(
     )
     colleges = sorted({c for c in db.exec(select(User.college_code).distinct()).all() if c})  # type: ignore[attr-defined]
 
+    # 一次把这一页所有成员的账号查出来，避免逐个查库（N+1）。
+    # 只取列表要显示的几个字段，不拉详情页那一整套。
+    accounts_by_user: dict[int, list[Account]] = {}
+    if items:
+        user_ids = [u.id for u in items if u.id]
+        for account in db.exec(
+            select(Account)
+            .where(Account.user_id.in_(user_ids))  # type: ignore[attr-defined]
+            .order_by(Account.platform, Account.identifier)  # type: ignore[attr-defined]
+        ).all():
+            accounts_by_user.setdefault(account.user_id, []).append(account)
+
+    def to_admin(u: User) -> UserAdmin:
+        # 用 from_attributes 逐字段构造，而不是 model_validate(u)：
+        # User 上有 accounts 这个 relationship，直接验证的话会把 Account
+        # 对象原样塞进 accounts 字段，类型对不上直接 500。
+        view = UserAdmin.model_validate(
+            {k: getattr(u, k) for k in UserAdmin.model_fields if k != "accounts"}
+        )
+        view.accounts = [
+            AdminAccountBrief(
+                id=a.id or 0,
+                platform=a.platform,
+                identifier=a.identifier,
+                display_name=a.display_name,
+                verified_at=a.verified_at,
+            )
+            for a in accounts_by_user.get(u.id or 0, [])
+        ]
+        return view
+
     return AdminUserPage(
-        items=[UserAdmin.model_validate(u) for u in items],
+        items=[to_admin(u) for u in items],
         total=total,
         page=page,
         page_size=page_size,

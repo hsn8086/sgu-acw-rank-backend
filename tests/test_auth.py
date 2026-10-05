@@ -1439,3 +1439,59 @@ def test_anonymous_cannot_read_admin_detail(root_client):
 
     anon = TestClient(create_app())
     assert anon.get(f"/api/admin/members/{created['id']}").status_code == 401
+
+
+def test_admin_user_list_includes_accounts(client, root_client):
+    """成员列表要带平台账号。
+
+    管理员在列表页最常看的两个信息就是「绑了没有」和「验没验过」，
+    没有的话得逐个点进详情页才知道。
+    """
+    from sqlmodel import Session
+
+    from app.db import get_engine
+    from app.models import Account, User, utcnow
+
+    # 建一个成员，然后直接往库里塞账号（绕开绑定流程，这里只关心列表输出）。
+    invite = _make_invite(root_client)
+    _register(client, invite["code"])
+
+    with Session(get_engine()) as db:
+        user = db.exec(select(User).where(User.student_id == MEMBER_STUDENT_ID)).first()
+        assert user is not None
+        # 一个已验证、一个未验证，覆盖两种显示状态。
+        db.add(
+            Account(
+                user_id=user.id,
+                platform="codeforces",
+                identifier="verified_one",
+                verified_at=utcnow(),
+            )
+        )
+        db.add(Account(user_id=user.id, platform="nowcoder", identifier="pending_one"))
+        db.commit()
+
+    body = root_client.get("/api/admin/users?page_size=50").json()
+    target = next(u for u in body["items"] if u["student_id"] == MEMBER_STUDENT_ID)
+
+    by_id = {a["identifier"]: a for a in target["accounts"]}
+    assert by_id["verified_one"]["verified_at"] is not None
+    assert by_id["pending_one"]["verified_at"] is None
+    # 只带列表要用的字段，不该把详情页那一整套塞进来。
+    assert set(by_id["verified_one"]) == {
+        "id",
+        "platform",
+        "identifier",
+        "display_name",
+        "verified_at",
+    }
+
+
+def test_admin_user_list_accounts_empty(root_client):
+    """没绑账号的成员，accounts 是空数组而不是缺字段。
+
+    前端靠这个长度判断显示「未绑定账号」还是账号标签。
+    """
+    body = root_client.get("/api/admin/users?page_size=50").json()
+    for user in body["items"]:
+        assert isinstance(user["accounts"], list)
