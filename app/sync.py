@@ -24,7 +24,7 @@ from datetime import date, timedelta
 
 from sqlmodel import Session, select
 
-from . import daytime, editorials
+from . import daily, daytime, editorials
 from .config import get_settings
 from .db import get_engine, init_db, session_scope
 from .models import (
@@ -450,6 +450,21 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
         len(errors),
         total,
     )
+
+    # 换天之后把当天的题抽出来。
+    #
+    # 抽题原本只在有人访问 /api/daily 时发生，于是凌晨 4:30 的生成任务
+    # 拿不到题目——那时候站点还没人访问。2026-10-05 就这样漏了一整天。
+    #
+    # 搭在同步任务上而不是单独一个 timer：同步每 5 分钟跑一次，换天后的
+    # 第一次唤醒就会抽，不用再多一个 unit。ensure_daily 是幂等的，
+    # 当天已经抽过就直接返回。
+    try:
+        with session_scope() as db:
+            drawn = daily.ensure_daily(db)
+        logger.info("daily problems ready: %s", ", ".join(r.key for r in drawn))
+    except Exception:  # noqa: BLE001 - 抽题失败不能拖垮同步
+        logger.exception("drawing daily problems failed")
 
     # 题解到点就公布。搭在同步任务上而不是单独一个 timer：公布只是把
     # 两个时间戳填上，几毫秒的事，而同步每 5 分钟就跑一次，足够准。

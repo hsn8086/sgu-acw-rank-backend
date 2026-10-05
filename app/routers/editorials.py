@@ -236,9 +236,17 @@ def list_pending(
 
     生成器开工前先问这里，而不是自己按日期算题目——题目落库是访问时才
     发生的，进程直接算可能与站点看到的不一致。
+
+    **这里会顺手把当天的题抽出来。** 抽题原本只在有人访问 ``/api/daily``
+    时发生，而生成任务在凌晨 4:30 跑——那时候站点还没人访问，题目还没
+    落库，于是它拿到一个空列表，什么都不做就退出了（2026-10-05 就这样
+    漏了一整天）。
+
+    生成器来问就说明它要用，在这里确保一下最省事。
     """
     target = daily_mod.workshop_today() if day is None else day
-    rows = editorials.daily_for_day(session, target)
+    # 幂等：当天已经有题就直接返回，不会重抽。
+    rows = daily_mod.ensure_daily(session, day=target)
     if not rows:
         return []
 

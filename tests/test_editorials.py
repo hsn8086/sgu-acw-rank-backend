@@ -758,3 +758,73 @@ def test_admin_missing_marks_today(root_client, db):
     by_key = {item["key"]: item for item in body}
     assert by_key["1000A"]["is_today"] is True
     assert by_key["1001A"]["is_today"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 抽题时机
+# --------------------------------------------------------------------------- #
+
+
+def test_pending_draws_problems_if_missing(client, db):
+    """pending 接口要能自己把当天的题抽出来。
+
+    抽题原本只在有人访问 /api/daily 时发生，而生成任务在凌晨 4:30 跑——
+    那时候站点还没人访问，题目还没落库，生成器拿到空列表就退出了，
+    当天一条题解都不会有（2026-10-05 就是这样漏的）。
+    """
+    from app import daily as daily_mod
+
+    today = daily_mod.workshop_today()
+    # 先确认当天确实没有题。
+    assert db.exec(select(DailyProblem).where(DailyProblem.day == today)).all() == []
+
+    # 候选池要有东西可抽。
+    _seed_problem(db, day=today, key="1000A")
+    _seed_problem(db, day=today, key="1001A")
+    _seed_problem(db, day=today, key="1002A")
+    for key, rating in (
+        ("1000A", 900),
+        ("1001A", 1200),
+        ("1002A", 1500),
+    ):
+        row = db.exec(select(ProblemCache).where(ProblemCache.key == key)).first()
+        assert row is not None
+        row.rating = rating
+        row.solved_count = 5000
+        row.has_statement = True
+        db.add(row)
+    db.commit()
+
+    # 清掉刚才 _seed_problem 建的每日一题，只留候选池。
+    for row in db.exec(select(DailyProblem)).all():
+        db.delete(row)
+    db.commit()
+
+    response = client.get(
+        "/api/internal/editorials/pending",
+        headers={"X-Editorial-Secret": SECRET},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    # 抽出来了，而且是三个档各一道。
+    assert len(body) == 3
+    assert {item["band"] for item in body} == {"800-1000", "1100-1300", "1400-1600"}
+
+
+def test_pending_is_idempotent(client, db):
+    """已经有题时不重抽——同一天两次调用返回同一套。"""
+    from app import daily as daily_mod
+
+    today = daily_mod.workshop_today()
+    _seed_problem(db, day=today, key="1000A")
+
+    first = client.get(
+        "/api/internal/editorials/pending",
+        headers={"X-Editorial-Secret": SECRET},
+    ).json()
+    second = client.get(
+        "/api/internal/editorials/pending",
+        headers={"X-Editorial-Secret": SECRET},
+    ).json()
+
+    assert [item["key"] for item in first] == [item["key"] for item in second]

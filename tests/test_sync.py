@@ -1192,3 +1192,43 @@ def test_nowcoder_main_reports_html_response_as_error(env):
     with pytest.raises(FetchError) as exc:
         _nowcoder_main_solved(FakeClient(), "825377486")
     assert "无法解析" in str(exc.value)
+
+
+def test_sync_draws_daily_problems(env):
+    """同步任务要把当天的每日一题抽出来。
+
+    抽题原本只在有人访问 /api/daily 时发生。生成任务凌晨 4:30 跑的时候
+    站点还没人访问，题目没落库，它拿到空列表就退出了——2026-10-05 漏了
+    一整天。搭在同步任务上，换天后的第一次唤醒就会抽。
+    """
+    from app import daily as daily_mod
+    from app import sync as sync_mod
+    from app.db import get_engine
+    from app.models import DailyProblem, ProblemCache
+
+    today = daily_mod.workshop_today()
+
+    with Session(get_engine()) as db:
+        assert db.exec(select(DailyProblem).where(DailyProblem.day == today)).all() == []
+        # 三个档各放一道候选。
+        for key, rating in (("1000A", 900), ("1001A", 1200), ("1002A", 1500)):
+            db.add(
+                ProblemCache(
+                    platform="codeforces",
+                    key=key,
+                    name=f"Problem {key}",
+                    rating=rating,
+                    solved_count=5000,
+                    has_statement=True,
+                    url=f"https://codeforces.com/problemset/problem/{key}",
+                )
+            )
+        db.commit()
+
+    # 只跑抽题那一段，不做网络同步（测试环境没有账号要抓）。
+    sync_mod.run_sync()
+
+    with Session(get_engine()) as db:
+        rows = db.exec(select(DailyProblem).where(DailyProblem.day == today)).all()
+    assert len(rows) == 3
+    assert {r.band for r in rows} == {"800-1000", "1100-1300", "1400-1600"}
