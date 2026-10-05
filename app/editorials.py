@@ -179,15 +179,20 @@ def publish_due(session: Session, *, now: datetime | None = None) -> int:
 
     drafts = session.exec(select(Editorial).where(Editorial.status == EditorialStatus.DRAFT)).all()
     for row in drafts:
-        if row.published_at is None and moment >= publish_at_for(row.day):
+        if moment < publish_at_for(row.day):
+            continue
+        # status 和 published_at 描述的是同一件事，一起改。
+        #
+        # 判据只看 status，不看 published_at 是否为空：补跑往日的题解时，
+        # 那条记录的 published_at 可能早就被之前的任务填上了（那时题解还
+        # 没生成，任务处理不到它），但 status 还是 draft。加上
+        # ``published_at is None`` 的话，这条记录就永远停在草稿。
+        row.status = EditorialStatus.PUBLISHED
+        if row.published_at is None:
             row.published_at = moment
-            # status 也要跟着走。它和 published_at 是两个字段，但描述的是
-            # 同一件事——只改时间戳的话，管理页会一直显示「草稿」，
-            # 而成员其实已经能看到了。
-            row.status = EditorialStatus.PUBLISHED
-            row.updated_at = moment
-            session.add(row)
-            changed += 1
+        row.updated_at = moment
+        session.add(row)
+        changed += 1
 
     if changed:
         session.commit()

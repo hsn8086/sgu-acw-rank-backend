@@ -828,3 +828,39 @@ def test_pending_is_idempotent(client, db):
     ).json()
 
     assert [item["key"] for item in first] == [item["key"] for item in second]
+
+
+def test_publish_due_fixes_stale_draft(db):
+    """到点了但 status 还是 draft 的，要被转成 published。
+
+    补跑往日的题解时会出现这种情况：那条记录的 published_at 早就被之前的
+    任务填上了（那时题解还没生成，任务处理不到它），等题解生成后 status
+    变成 draft，但 published_at 已经不是 None。判据里加上
+    ``published_at is None`` 的话，它永远停在草稿。
+    """
+    problem = _seed_problem(db, day="2026-03-10")
+    editorials.upsert(
+        db,
+        daily_problem_id=problem.id or 0,
+        day=problem.day,
+        platform=problem.platform,
+        key=problem.key,
+        hints="",
+        body=BODY,
+        code=CODE,
+    )
+
+    # 模拟「时间戳已填、状态还是草稿」。
+    row = editorials.get_for_problem(db, problem.id or 0)
+    assert row is not None
+    row.published_at = editorials.publish_at_for(problem.day)
+    row.status = EditorialStatus.DRAFT
+    db.add(row)
+    db.commit()
+
+    after = editorials.publish_at_for(problem.day) + timedelta(hours=1)
+    assert editorials.publish_due(db, now=after) == 1
+
+    db.expire_all()
+    row = editorials.get_for_problem(db, problem.id or 0)
+    assert row.status == EditorialStatus.PUBLISHED
