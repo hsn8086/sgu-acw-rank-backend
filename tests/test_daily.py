@@ -113,8 +113,11 @@ def seed_problems(session: Session, entries: list[dict]) -> None:
 #: 造数据用的比赛 id 起点。
 #:
 #: 必须落在 2024 年之前（id < 1918），否则会被「只要 2024 年之前的题」
-#: 这个过滤条件筛掉。三个档位各占一段，互不重叠，方便按档位断言。
-_BASE_CONTEST_ID = {"800-1000": 1000, "1100-1300": 1100, "1400-1600": 1200}
+#: 这个过滤条件筛掉。每个档位占一段互不重叠的区间，方便按档位断言。
+#:
+#: 按 BAND_ORDER 的下标算，不写死映射表——加档位时不用改这里。
+_BASE_CONTEST_ID = 1000
+_BAND_STRIDE = 100
 
 
 def make_user(session: Session, student_id: str, display_name: str = "测试成员") -> int:
@@ -153,7 +156,7 @@ def make_pool(band: str, count: int, solved: int = 5000) -> list[dict]:
     注意别把 ``band`` 当数字前缀用——``f"{1000}{i:02d}A"`` 会拼出
     ``100000A``，比赛 id 变成 100000，那是 2024 年之后的题，会被过滤掉。
     """
-    base = _BASE_CONTEST_ID[band]
+    base = _BASE_CONTEST_ID + daily.BAND_ORDER.index(band) * _BAND_STRIDE
     rating = daily.BANDS[band][0]
     return [
         {
@@ -440,14 +443,15 @@ def test_ensure_daily_persists_and_is_idempotent(env):
 
 
 def test_ensure_daily_covers_all_three_bands(env):
-    """每天三道，三个档位各一道。"""
+    """每个档位各一道，档位顺序与 BAND_ORDER 一致。"""
     from app import daily
     from app.db import get_engine
 
     with Session(get_engine()) as session:
+        # 池子按 BAND_ORDER 生成，加档位时不用改这里。
         seed_problems(
             session,
-            make_pool("800-1000", 10) + make_pool("1100-1300", 10) + make_pool("1400-1600", 10),
+            [p for band in daily.BAND_ORDER for p in make_pool(band, 10)],
         )
         rows = daily.ensure_daily(session, day="2026-03-01")
 

@@ -506,7 +506,7 @@ class DailyProblemSolve(SQLModel, table=True):
     #: 签到日期，东八区，YYYY-MM-DD。
     day: str = Field(max_length=10, index=True)
 
-    #: 当天做对的那道题。三道里任意一道就算签到，记下第一道。
+    #: 当天做对的那道题。任意一道就算签到，记下第一道。
     platform: str = Field(max_length=16)
     key: str = Field(max_length=128)
 
@@ -573,7 +573,7 @@ class ProblemCache(SQLModel, table=True):
 class DailyProblem(SQLModel, table=True):
     """每日一题。
 
-    每天三道，按难度分档各抽一道（800-1000 / 1100-1300 / 1400-1600）。
+    每天按难度分档各抽一道，档位见 ``daily.BANDS``。
     抽中过的题不再参与后续抽取，直到整池抽完——这样一轮下来覆盖面是
     均匀的，不会反复抽到那几十道「经典入门题」。
 
@@ -627,7 +627,7 @@ class Editorial(SQLModel, table=True):
 
     **为什么按题存而不是按天存**：
 
-    一天三道题，分属不同难度档。按天存的话，三篇题解挤在一个字段里，
+    一天几道题，分属不同难度档。按天存的话，几篇题解挤在一个字段里，
     前端要么整块显示要么整块隐藏，没法按题展开。按题存则每道题各自
     有状态，一道生成失败不影响另外两道。
 
