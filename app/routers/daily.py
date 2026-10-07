@@ -222,6 +222,113 @@ class CheckinBoard(BaseModel):
     total_members: int = 0
 
 
+class SolverEntry(BaseModel):
+    """某道题的一个通过者。"""
+
+    rank: int
+    user_id: int
+    display_name: str
+    student_id: str
+    enroll_year: int
+    class_label: str | None = None
+    #: 我们记录到的时刻。不是平台上真实的通过时间，见 daily.earliest_solvers。
+    solved_at: datetime
+
+
+class ProblemSolvers(BaseModel):
+    """某道题的通过情况。"""
+
+    #: 难度档，如 ``800-1000``。
+    band: str
+    platform: str
+    key: str
+    name: str = ""
+    rating: int | None = None
+    #: 题面地址。前端不自己拼——各平台的地址格式不一样，而且会变。
+    url: str = ""
+
+    #: 通过者，按记录时间从早到晚。第一个就是「最早通过」。
+    entries: list[SolverEntry] = Field(default_factory=list)
+
+
+class DailySolversBoard(BaseModel):
+    """当天每道题各自的通过名单。"""
+
+    day: str
+    problems: list[ProblemSolvers] = Field(default_factory=list)
+
+
+@router.get("/daily/solvers", response_model=DailySolversBoard)
+def get_daily_solvers(
+    day: str | None = Query(default=None, description="YYYY-MM-DD，默认今天"),
+    session: Session = Depends(get_session),
+) -> DailySolversBoard:
+    """当天每道题谁通过了，按记录时间从早到晚。
+
+    和签到榜的区别：签到榜是「谁连续来了几天」，这个是「哪道题谁先做出来」。
+    一道题没人通过就不出现在列表里。
+    """
+    target = day or daily.workshop_today()
+    problems = daily.daily_for_day(session, target)
+    if not problems:
+        return DailySolversBoard(day=target)
+
+    grouped = daily.earliest_solvers(session, day=target)
+
+    # 一次把所有涉及的用户查出来，避免逐条查库。
+    user_ids = {row.user_id for rows in grouped.values() for row in rows}
+    users = {
+        user.id: user
+        for user in session.exec(select(User).where(User.id.in_(user_ids))).all()  # type: ignore[attr-defined]
+    } if user_ids else {}
+
+    # 题目元信息也一次查完。
+    keys = [p.key for p in problems]
+    cache = {
+        row.key: row
+        for row in session.exec(
+            select(ProblemCache).where(
+                ProblemCache.platform == "codeforces",  # type: ignore[arg-type]
+                ProblemCache.key.in_(keys),  # type: ignore[attr-defined]
+            )
+        ).all()
+    }
+
+    out: list[ProblemSolvers] = []
+    for problem in problems:
+        cached = cache.get(problem.key)
+        entries: list[SolverEntry] = []
+        for row in grouped.get(f"{problem.platform}:{problem.key}", []):
+            user = users.get(row.user_id)
+            if user is None:
+                continue
+            entries.append(
+                SolverEntry(
+                    rank=len(entries) + 1,
+                    user_id=row.user_id,
+                    display_name=user.display_name,
+                    student_id=user.student_id,
+                    enroll_year=user.enroll_year,
+                    class_label=user.class_label,
+                    solved_at=row.created_at,
+                )
+            )
+        out.append(
+            ProblemSolvers(
+                band=problem.band,
+                platform=problem.platform,
+                key=problem.key,
+                name=cached.name if cached else "",
+                rating=cached.rating if cached else None,
+                # 地址现算，不用缓存里的——缓存可能是旧格式，清过之后才准。
+                url=problem_url(problem.platform, problem.key),
+                entries=entries,
+            )
+        )
+
+    return DailySolversBoard(day=target, problems=out)
+
+
 @router.get("/daily/checkin", response_model=CheckinBoard)
 def get_checkin_board(
     limit: int = Query(default=50, ge=1, le=200),

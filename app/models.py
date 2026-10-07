@@ -475,7 +475,7 @@ class SyncRun(SQLModel, table=True):
 
 
 class DailyProblemSolve(SQLModel, table=True):
-    """某人某天做对了每日一题里的哪道。
+    """某人某天做对了每日一题里的**某一道**。
 
     「签到」记的是这件事，不是「今天有没有做题」。两者不一样：平时刷题
     再多，没碰当天的每日一题就不算签到。
@@ -493,11 +493,22 @@ class DailyProblemSolve(SQLModel, table=True):
     洛谷没有时间戳（``fetch_solved_luogu`` 一律给 0），它只能靠快照差分
     判断「新过了哪些题」。那种情况下也做同样的比对，只是「哪天做对的」
     精确到同步当天。
+
+    **一人一天可以有多条**：四道题各通过一道就记四条。唯一约束因此是
+    ``(user_id, day, platform, key)`` 而不是 ``(user_id, day)``——后者
+    只留得下第一道命中的题，「每道题谁最早通过」就无从统计了。
+
+    ``created_at`` 是**我们记录的时刻**，不是平台上真实的通过时间。
+    同步每 5 分钟一批，所以「最早通过」的精度就是这个间隔。平台上不给
+    提交时间戳的平台（洛谷）连这个精度都没有，只能记到同步当天。
     """
 
     __tablename__ = "daily_problem_solves"
     __table_args__ = (
-        UniqueConstraint("user_id", "day", name="uq_daily_solve_user_day"),
+        UniqueConstraint(
+            "user_id", "day", "platform", "key",
+            name="uq_daily_solve_user_day_problem",
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
@@ -506,7 +517,7 @@ class DailyProblemSolve(SQLModel, table=True):
     #: 签到日期，东八区，YYYY-MM-DD。
     day: str = Field(max_length=10, index=True)
 
-    #: 当天做对的那道题。任意一道就算签到，记下第一道。
+    #: 当天做对的那道题。
     platform: str = Field(max_length=16)
     key: str = Field(max_length=128)
 

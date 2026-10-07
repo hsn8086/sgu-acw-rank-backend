@@ -845,7 +845,7 @@ def test_record_solves_marks_a_checkin(env):
             solved_keys={(target.platform, target.key)},
         )
 
-    assert recorded is True
+    assert recorded == 1
 
 
 def test_record_solves_ignores_other_days_problems(env):
@@ -883,18 +883,18 @@ def test_record_solves_ignores_other_days_problems(env):
             solved_keys={("codeforces", other.key)},
         )
 
-    assert recorded is False
+    assert recorded == 0
 
 
 def test_record_solves_is_idempotent(env):
-    """同一天重复记只算一次。同步一天跑很多次。"""
+    """同一天重复记不会重复写。同步一天跑很多次。"""
     from app import daily
     from app.db import get_engine
 
     with Session(get_engine()) as session:
         seed_problems(
             session,
-            make_pool("800-1000", 3) + make_pool("1100-1300", 3) + make_pool("1400-1600", 3),
+            [p for band in daily.BAND_ORDER for p in make_pool(band, 3)],
         )
         rows = daily.ensure_daily(session, day="2026-03-01")
         keys = {(rows[0].platform, rows[0].key)}
@@ -902,13 +902,52 @@ def test_record_solves_is_idempotent(env):
 
         assert daily.record_solves(
             session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
-        )
-        assert not daily.record_solves(
+        ) == 1
+        # 第二次不该再记。
+        assert daily.record_solves(
             session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
-        )
+        ) == 0
         board = daily.checkin_leaderboard(session)
         assert len(board) == 1
         assert board[0].user_id == uid
+        assert board[0].days == 1
+
+
+def test_record_solves_records_each_problem(env):
+    """做了几道就记几条。
+
+    以前一天只记一条（第一道命中的），「每道题谁最早通过」就没数据可查。
+    """
+    from app import daily
+    from app.db import get_engine
+    from app.models import DailyProblemSolve
+
+    with Session(get_engine()) as session:
+        seed_problems(
+            session,
+            [p for band in daily.BAND_ORDER for p in make_pool(band, 3)],
+        )
+        rows = daily.ensure_daily(session, day="2026-03-01")
+        # 三道里做了两道。
+        keys = {(rows[0].platform, rows[0].key), (rows[1].platform, rows[1].key)}
+        uid = make_user(session, "24125023099")
+
+        assert daily.record_solves(
+            session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
+        ) == 2
+
+        stored = session.exec(
+            select(DailyProblemSolve).where(DailyProblemSolve.user_id == uid)
+        ).all()
+        assert {r.key for r in stored} == {rows[0].key, rows[1].key}
+
+        # 再补做第三道，只新增一条。
+        all_keys = keys | {(rows[2].platform, rows[2].key)}
+        assert daily.record_solves(
+            session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=all_keys
+        ) == 1
+        # 签到天数仍然是一天——同一天做几道只算一次签到。
+        board = daily.checkin_leaderboard(session)
         assert board[0].days == 1
 
 
@@ -928,7 +967,7 @@ def test_record_solves_without_daily_problems_is_noop(env):
             solved_keys={("codeforces", "1000A")},
         )
 
-    assert recorded is False
+    assert recorded == 0
 
 
 def test_checkin_streak_counts_consecutive_days(env):
@@ -1373,3 +1412,103 @@ def test_problem_entry_url_is_computed_not_cached(env):
     assert entry.url == "https://ac.nowcoder.com/acm/problem/233234"
     # 名字仍然来自缓存——那个没法现算
     assert entry.name == "233234"
+
+
+# --------------------------------------------------------------------------- #
+# 每题通过名单
+# --------------------------------------------------------------------------- #
+
+
+def test_solvers_lists_each_problem(root_client, env):
+    """四道题各自的通过者都要列出来，按记录时间从早到晚。"""
+    from app import daily
+    from app.db import get_engine
+
+    with Session(get_engine()) as session:
+        seed_problems(
+            session,
+            [p for band in daily.BAND_ORDER for p in make_pool(band, 5)],
+        )
+        rows = daily.ensure_daily(session, day="2026-03-01")
+        # session 关掉之后 ORM 对象就 detached 了，先把要用的值取出来。
+        keys = [(r.platform, r.key) for r in rows]
+
+        # 第一个人做对前两道，第二个人只做对第一道。
+        alice = make_user(session, "24125023001", "甲")
+        bob = make_user(session, "24125023002", "乙")
+        daily.record_solves(
+            session,
+            user_id=alice,
+            account_id=None,
+            day="2026-03-01",
+            solved_keys={keys[0], keys[1]},
+        )
+        daily.record_solves(
+            session,
+            user_id=bob,
+            account_id=None,
+            day="2026-03-01",
+            solved_keys={keys[0]},
+        )
+
+    board = root_client.get("/api/daily/solvers?day=2026-03-01").json()
+    assert board["day"] == "2026-03-01"
+
+    by_key = {p["key"]: p for p in board["problems"]}
+    # 四道题都在列表里，没通过的 entries 为空。
+    assert len(board["problems"]) == len(daily.BAND_ORDER)
+
+    assert [e["display_name"] for e in by_key[keys[0][1]]["entries"]] == ["甲", "乙"]
+    assert [e["rank"] for e in by_key[keys[0][1]]["entries"]] == [1, 2]
+    assert [e["display_name"] for e in by_key[keys[1][1]]["entries"]] == ["甲"]
+
+    assert by_key[keys[2][1]]["entries"] == []
+
+
+def test_solvers_orders_by_record_time(root_client, env):
+    """先记的排前面——「最早通过」看的就是这个顺序。"""
+    from datetime import UTC, datetime, timedelta
+
+    from app import daily
+    from app.db import get_engine
+    from app.models import DailyProblemSolve
+
+    with Session(get_engine()) as session:
+        seed_problems(
+            session,
+            [p for band in daily.BAND_ORDER for p in make_pool(band, 5)],
+        )
+        rows = daily.ensure_daily(session, day="2026-03-01")
+        target_platform, target_key = rows[0].platform, rows[0].key
+
+        late = make_user(session, "24125023001", "后到的")
+        early = make_user(session, "24125023002", "先到的")
+        now = datetime.now(UTC)
+
+        # 直接写库，控制 created_at——正常路径上这个值是 utcnow()，
+        # 没法在测试里分出先后。
+        session.add(
+            DailyProblemSolve(
+                user_id=late, day="2026-03-01", platform=target_platform,
+                key=target_key, created_at=now,
+            )
+        )
+        session.add(
+            DailyProblemSolve(
+                user_id=early, day="2026-03-01", platform=target_platform,
+                key=target_key, created_at=now - timedelta(minutes=10),
+            )
+        )
+        session.commit()
+
+    board = root_client.get("/api/daily/solvers?day=2026-03-01").json()
+    target_board = next(p for p in board["problems"] if p["key"] == target_key)
+    assert [e["display_name"] for e in target_board["entries"]] == ["先到的", "后到的"]
+    assert target_board["entries"][0]["rank"] == 1
+
+
+def test_solvers_empty_day(root_client, env):
+    """那天没有题时返回空列表，不报错。"""
+    board = root_client.get("/api/daily/solvers?day=2020-01-01").json()
+    assert board["day"] == "2020-01-01"
+    assert board["problems"] == []

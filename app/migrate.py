@@ -178,6 +178,96 @@ def _rename_columns(*, check_only: bool = False) -> int:
     return changed
 
 
+def _widen_daily_solve_constraint(*, check_only: bool = False) -> int:
+    """把「一人一天一条」放宽成「一人一天每道题一条」。
+
+    原来唯一约束是 ``(user_id, day)``，一个人一天只留得下第一道命中的题。
+    要统计「每道题谁最早通过」就必须每题各记一条，约束改成
+    ``(user_id, day, platform, key)``。
+
+    SQLite 不能直接改约束，只能重建表：建新表 → 拷数据 → 删旧表 → 改名。
+    这个过程在事务里做，中途失败会整体回滚。
+
+    **历史数据保留**：老记录只知道「那天通过了某道题」，不知道具体哪几道，
+    补不回来。但它们仍然有效（至少说明那天签到了），所以原样搬过去。
+
+    只处理加列的老路走不通：``missing_columns`` 比对的是列名，约束不在它
+    的视野里，这个改动它发现不了。
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(get_engine())
+    if not inspector.has_table("daily_problem_solves"):
+        return 0
+
+    # 看现有约束。已经改过就跳过。
+    with get_engine().connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='daily_problem_solves'"
+            )
+        ).fetchone()
+    if row is None:
+        return 0
+    ddl = row[0] or ""
+    if "uq_daily_solve_user_day_problem" in ddl:
+        return 0
+    if "uq_daily_solve_user_day" not in ddl:
+        # 约束名对不上，说明表结构不是预期的样子。不动它，免得把数据搞坏。
+        logger.warning("daily_problem_solves 的约束与预期不符，跳过")
+        return 0
+
+    if check_only:
+        logger.warning("daily_problem_solves 需要放宽唯一约束")
+        return 1
+
+    # 建新表 → 拷数据 → 删旧表 → 改名。整段一个事务。
+    with get_engine().begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE daily_problem_solves_new (
+                id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                day VARCHAR(10) NOT NULL,
+                platform VARCHAR(16) NOT NULL,
+                "key" VARCHAR(128) NOT NULL,
+                account_id INTEGER,
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (id),
+                CONSTRAINT uq_daily_solve_user_day_problem
+                    UNIQUE (user_id, day, platform, "key"),
+                FOREIGN KEY(user_id) REFERENCES users (id),
+                FOREIGN KEY(account_id) REFERENCES accounts (id)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO daily_problem_solves_new
+                (id, user_id, day, platform, "key", account_id, created_at)
+            SELECT id, user_id, day, platform, "key", account_id, created_at
+            FROM daily_problem_solves
+            """
+        )
+        connection.exec_driver_sql("DROP TABLE daily_problem_solves")
+        connection.exec_driver_sql(
+            "ALTER TABLE daily_problem_solves_new RENAME TO daily_problem_solves"
+        )
+        # 索引跟着旧表一起没了，重建。
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_daily_problem_solves_day "
+            "ON daily_problem_solves (day)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX ix_daily_problem_solves_user_id "
+            "ON daily_problem_solves (user_id)"
+        )
+
+    logger.info("daily_problem_solves 的唯一约束已放宽")
+    return 1
+
+
 def run_migration(*, check_only: bool = False) -> int:
     """补列。返回补了几列。"""
     init_db()  # 先把缺的表建出来
@@ -185,12 +275,16 @@ def run_migration(*, check_only: bool = False) -> int:
     # 把「名字不同」误判成「缺列」。
     renamed = _rename_columns(check_only=check_only)
 
+    # 改约束要重建表，放在补列之前：重建后的表结构是新的，missing_columns
+    # 不会再多事。
+    widened = _widen_daily_solve_constraint(check_only=check_only)
+
     fixed = _fix_nowcoder_keys(check_only=check_only)
 
     pending = missing_columns()
     if not pending:
         logger.info("没有缺的列")
-        return renamed + fixed
+        return renamed + widened + fixed
 
     total = 0
     for table_name, columns in pending.items():
@@ -209,7 +303,7 @@ def run_migration(*, check_only: bool = False) -> int:
                 connection.exec_driver_sql(statement)
             total += 1
 
-    return renamed + total + fixed
+    return renamed + widened + total + fixed
 
 
 def main() -> None:

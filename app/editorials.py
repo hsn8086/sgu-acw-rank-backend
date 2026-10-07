@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 
 from sqlmodel import Session, select
 
-from . import daily, daytime
+from . import daytime
 from .models import (
     DailyProblem,
     Editorial,
@@ -250,17 +250,6 @@ def public_view(row: Editorial, *, now: datetime | None = None) -> dict:
     }
 
 
-def daily_for_day(session: Session, day: str) -> list[DailyProblem]:
-    """某一天的每日一题，按难度档排好。
-
-    档位顺序直接用 ``daily.BAND_ORDER``。这里一度自己写了一份，加档位时
-    很容易漏改一处，两边就不一致了。
-    """
-    rows = session.exec(select(DailyProblem).where(DailyProblem.day == day)).all()
-    order = list(daily.BAND_ORDER)
-    return sorted(rows, key=lambda row: order.index(row.band) if row.band in order else 99)
-
-
 def problem_meta(session: Session, rows: list[DailyProblem]) -> dict[str, ProblemCache]:
     """批量取题目元信息，避免逐题查库。"""
     if not rows:
@@ -294,7 +283,6 @@ def recent_days(session: Session, *, before: str, limit: int = 30) -> list[str]:
 __all__ = [
     "LANGUAGES",
     "PUBLISH_HOUR",
-    "daily_for_day",
     "get_for_day",
     "get_for_problem",
     "mark_failed",

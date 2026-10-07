@@ -129,7 +129,7 @@ def get_day_editorials(
             status_code=status.HTTP_400_BAD_REQUEST, detail="日期格式应为 YYYY-MM-DD"
         ) from None
 
-    rows = editorials.daily_for_day(session, target)
+    rows = daily_mod.daily_for_day(session, target)
     cache = _meta(session, rows)
     return DayEditorials(
         day=target,
@@ -350,7 +350,7 @@ def generator_status(
 ) -> dict:
     """生成器的自检口：今天的题解齐了没有。"""
     target = daily_mod.workshop_today() if day is None else day
-    rows = editorials.daily_for_day(session, target)
+    rows = daily_mod.daily_for_day(session, target)
     existing = editorials.get_for_day(session, target)
 
     by_status: dict[str, int] = {}

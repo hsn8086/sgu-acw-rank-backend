@@ -267,7 +267,7 @@ def ensure_daily(
         select(DailyProblem).where(DailyProblem.day == target)
     ).all()
     if existing and not force:
-        return _sorted_by_band(existing)
+        return sorted_by_band(existing)
 
     if force:
         # 先把挂在旧题上的题解删掉。
@@ -312,13 +312,22 @@ def ensure_daily(
     session.commit()
     for row in created:
         session.refresh(row)
-    return _sorted_by_band(created)
+    return sorted_by_band(created)
 
 
-def _sorted_by_band(rows: list[DailyProblem]) -> list[DailyProblem]:
+def sorted_by_band(rows: list[DailyProblem]) -> list[DailyProblem]:
     """按档位顺序排，前端不用再排。"""
     order = {band: index for index, band in enumerate(BAND_ORDER)}
     return sorted(rows, key=lambda r: order.get(r.band, 99))
+
+
+def daily_for_day(db: Session, day: str) -> list[DailyProblem]:
+    """某一天的每日一题，按档位排好。
+
+    只读，不抽题——要「没有就抽出来」用 ``ensure_daily``。
+    """
+    rows = db.exec(select(DailyProblem).where(DailyProblem.day == day)).all()
+    return sorted_by_band(rows)
 
 
 def next_reset_at(now: datetime | None = None) -> datetime:
@@ -356,49 +365,57 @@ def record_solves(
     account_id: int | None,
     day: str,
     solved_keys: set[str],
-) -> bool:
-    """比对某人已过的题与某天的每日一题，记一条签到。
+) -> int:
+    """比对某人已过的题与某天的每日一题，把命中的都记下来。
 
     ``solved_keys`` 是这个人所有账号的已过题目（平台 + 题号），与题单
     完成度的口径一致。
 
-    返回是否新记了一条。已经签过就直接返回 False，不重复写——同一天
-    多次同步是常态。
-    """
-    existing = db.exec(
-        select(DailyProblemSolve).where(
-            DailyProblemSolve.user_id == user_id,
-            DailyProblemSolve.day == day,
-        )
-    ).first()
-    if existing is not None:
-        return False
+    返回这次**新记了几条**。已经记过的不重复写——同一天多次同步是常态。
 
+    一个人一天可能命中多道（四道题做了三道就记三条）。每条各记各的，
+    这样「每道题谁最早通过」才有数据可查。
+    """
     today_problems = db.exec(
         select(DailyProblem).where(DailyProblem.day == day)
     ).all()
     if not today_problems:
         # 那天的题还没抽（或者抽不出来），没什么可比的。
-        return False
+        return 0
 
-    hit = next(
-        (row for row in today_problems if (row.platform, row.key) in solved_keys),
-        None,
-    )
-    if hit is None:
-        return False
+    hits = [row for row in today_problems if (row.platform, row.key) in solved_keys]
+    if not hits:
+        return 0
 
-    db.add(
-        DailyProblemSolve(
-            user_id=user_id,
-            day=day,
-            platform=hit.platform,
-            key=hit.key,
-            account_id=account_id,
+    # 已经记过的题号。一次查完，别在循环里逐个查。
+    existing = {
+        (row.platform, row.key)
+        for row in db.exec(
+            select(DailyProblemSolve).where(
+                DailyProblemSolve.user_id == user_id,
+                DailyProblemSolve.day == day,
+            )
+        ).all()
+    }
+
+    added = 0
+    for hit in hits:
+        if (hit.platform, hit.key) in existing:
+            continue
+        db.add(
+            DailyProblemSolve(
+                user_id=user_id,
+                day=day,
+                platform=hit.platform,
+                key=hit.key,
+                account_id=account_id,
+            )
         )
-    )
-    db.commit()
-    return True
+        added += 1
+
+    if added:
+        db.commit()
+    return added
 
 
 def solved_by_count(db: Session, rows: list[DailyProblem]) -> dict[str, int]:
@@ -498,6 +515,36 @@ def checkin_leaderboard(
     return standings[:limit]
 
 
+def earliest_solvers(
+    db: Session, *, day: str | None = None
+) -> dict[str, list[DailyProblemSolve]]:
+    """某天每道题谁通过了，按记录时间从早到晚。
+
+    返回「平台:题号」→ 记录列表。没有通过的题不出现在结果里。
+
+    **时间精度是同步间隔**。``created_at`` 是同步任务发现这道题已通过的
+    时刻，不是平台上真正的通过时间——CF 的 API 只给「首次通过的秒级时间
+    戳」，那个没存进这张表。同步每 5 分钟一批，所以排序只在同一批内可靠，
+    跨批次能分出先后。
+
+    真要精确到秒，得把平台上给的时间戳一起存下来。洛谷连时间戳都不给
+    （``fetch_solved_luogu`` 一律给 0），那条路走不通，所以统一用记录
+    时间，至少口径一致。
+    """
+    target = day or workshop_today()
+
+    rows = db.exec(
+        select(DailyProblemSolve)
+        .where(DailyProblemSolve.day == target)
+        .order_by(DailyProblemSolve.created_at)  # type: ignore[arg-type]
+    ).all()
+
+    grouped: dict[str, list[DailyProblemSolve]] = {}
+    for row in rows:
+        grouped.setdefault(f"{row.platform}:{row.key}", []).append(row)
+    return grouped
+
+
 def checkin_streak(db: Session, *, user_id: int, today: str | None = None) -> int:
     """某人当前连续签到天数。"""
     days = set(
@@ -518,6 +565,7 @@ __all__ = [
     "backfill_days",
     "checkin_leaderboard",
     "checkin_streak",
+    "daily_for_day",
     "ensure_daily",
     "load_candidates",
     "next_reset_at",
