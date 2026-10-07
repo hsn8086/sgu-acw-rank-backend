@@ -64,9 +64,14 @@ PENDING=$(curl -fsS \
 # 少一个依赖。
 # 外层用双引号、内层用单引号：反过来的话 shell 会把 python 里的单引号
 # 当成字符串结束，代码被截断。
+# 只挑还没有题解的。接口会把已有的也返回（带 has_editorial 标记，供
+# 重跑用），但定时任务不该重写已经生成的——那是白跑一遍，而且会把人工
+# 改过的内容覆盖掉。
 ROWS=$(printf '%s' "$PENDING" | python3 -c "
 import json, sys
 for item in json.load(sys.stdin):
+    if item.get('has_editorial'):
+        continue
     print(f\"{item['daily_problem_id']}\t{item['key']}\")
 ")
 
@@ -91,14 +96,19 @@ while IFS=$'\t' read -r PID KEY; do
 
   echo "--- ${KEY} (id=${PID}) ---"
 
-  # 不做交互确认：这是无人值守跑的。
-  # 不给 session 文件：每道题独立，没有续接的需求。
+  # ``< /dev/null`` 不能省。
+  #
+  # 这个 while 循环的输入是上面的 here-string，而 pi 会从 stdin 读东西
+  # （它是个交互式 CLI）。不重定向的话，第一道题就把剩下的行吃掉了，
+  # 循环只跑一次——2026-10-07 那天的任务就是这么只生成了一篇题解的。
+  #
+  # 其他两点：不做交互确认（无人值守），不给 session 文件（每道题独立）。
   if timeout "$PER_PROBLEM_TIMEOUT" pi -p \
     --approve \
     --no-session \
     --provider sgu \
     --model "${SGU_ACW_EDITORIAL_MODEL:-deepseek-flash}" \
-    "$PROMPT"; then
+    "$PROMPT" < /dev/null; then
     OK=$((OK + 1))
     echo "--- ${KEY} 完成 ---"
   else
