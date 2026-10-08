@@ -29,6 +29,8 @@ from .config import get_settings
 from .db import get_engine, init_db, session_scope
 from .models import (
     Account,
+    Camp,
+    CampRegistration,
     DailyProblem,
     DailyProgress,
     Platform,
@@ -382,7 +384,40 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
     init_db()
 
     # 先把该抓哪些账号定下来，单独一个短事务。
+    #
+    # 顺带处理「刚截止的集训」：end_at 落在最近两次唤醒之间的集训，把
+    # 所有报名账号的 solved_fetched_at 清成 None——排行榜算的是截止那
+    # 一刻的已解决状态，得在截止后立刻把这些账号刷一遍才准。窗口给
+    # 15 分钟而不是恰好一个 tick：timer 漂移、sync 偶尔慢一步都不至于
+    # 漏掉；重复清 None 是幂等的。
     with session_scope() as db:
+        now = utcnow()
+        cutoff = now - timedelta(minutes=15)
+        ended_camps = db.exec(
+            select(Camp).where(Camp.end_at <= now, Camp.end_at > cutoff)
+        ).all()
+        for camp in ended_camps:
+            regs = db.exec(
+                select(CampRegistration).where(CampRegistration.camp_id == camp.id)
+            ).all()
+            user_ids = [r.user_id for r in regs]
+            if not user_ids:
+                continue
+            needed_accounts = db.exec(
+                select(Account).where(
+                    Account.user_id.in_(user_ids),  # type: ignore[attr-defined]
+                    Account.verified_at.is_not(None),  # type: ignore[union-attr]
+                )
+            ).all()
+            for acc in needed_accounts:
+                acc.solved_fetched_at = None
+                db.add(acc)
+            logger.info(
+                "camp %s ended: marked %d account(s) for immediate sync",
+                camp.name,
+                len(needed_accounts),
+            )
+
         statement = select(Account).where(Account.verified_at.is_not(None))  # type: ignore[union-attr]
         if platforms:
             statement = statement.where(Account.platform.in_(platforms))  # type: ignore[attr-defined]

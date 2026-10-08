@@ -328,6 +328,13 @@ class Account(SQLModel, table=True):
     #: 最近一次抓取出错的原因。有值时调度器会把它排得更靠前重试。
     last_error: str | None = Field(default=None, max_length=500)
 
+    #: 在这个时间之前，同步间隔钳到一小时。
+    #:
+    #: 集训报名用：报了名的人，他的账号在集训期间至少一小时刷一次，
+    #: 排行榜才不至于滞后半天。集训一结束这个字段就过期了，不需要
+    #: 清理——``is_due`` 只看 ``now < boost_until``。
+    sync_boost_until: datetime | None = None
+
     #: 连续失败次数。用于退避：一个持续失败的账号（平台改版、账号注销）
     #: 不该每五分钟撞一次墙。任何一次成功都会清零。
     consecutive_failures: int = Field(default=0)
@@ -393,6 +400,9 @@ class Account(SQLModel, table=True):
             return True
 
         interval = self.sync_interval_seconds(now=now, base=base, cap=cap)
+        # 集训加速：窗口内一小时一次，比活跃度算出来的间隔更紧就收紧。
+        if self.sync_boost_until and now < self.sync_boost_until:
+            interval = min(interval, 3600)
         if self.consecutive_failures:
             # 2^n 增长，封顶用 cap，避免溢出。
             shift = min(self.consecutive_failures, 32)
@@ -525,6 +535,57 @@ class DailyProblemSolve(SQLModel, table=True):
     account_id: int | None = Field(default=None, foreign_key="accounts.id")
 
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class Camp(SQLModel, table=True):
+    """一次集训。
+
+    ``start_at`` 是题目可看、算分开始的时间；``end_at`` 是报名截止、算分
+    截止的时间。过了 ``end_at`` 之后，不管谁再过题都不算进这份集训。
+    """
+
+    __tablename__ = "camps"
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    description: str = ""
+    start_at: datetime
+    end_at: datetime
+    created_by: int = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class CampProblem(SQLModel, table=True):
+    """集训里的一道题。
+
+    ``platform`` 和 ``key`` 合起来定位一道题。``position`` 是展示顺序，
+    管理员可以调。
+    """
+
+    __tablename__ = "camp_problems"
+    __table_args__ = (UniqueConstraint("camp_id", "platform", "key", name="uq_camp_problem"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    camp_id: int = Field(foreign_key="camps.id", index=True)
+    platform: str = Field(max_length=16)
+    key: str = Field(max_length=128)
+    position: int = 0
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class CampRegistration(SQLModel, table=True):
+    """某人报名了某次集训。
+
+    报名校验：这份集训涉及的平台，该用户至少有一个已验证账号。
+    """
+
+    __tablename__ = "camp_registrations"
+    __table_args__ = (UniqueConstraint("camp_id", "user_id", name="uq_camp_registration"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    camp_id: int = Field(foreign_key="camps.id", index=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    registered_at: datetime = Field(default_factory=utcnow)
 
 
 class ProblemCache(SQLModel, table=True):
