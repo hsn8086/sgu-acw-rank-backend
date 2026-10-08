@@ -15,6 +15,7 @@ from sqlmodel import Session, select
 from .. import camps as camps_mod
 from ..deps import get_current_user, get_optional_user, get_session, require_admin
 from ..models import Camp, CampProblem, CampRegistration, User
+from ..problems import normalize_key
 
 router = APIRouter(tags=["camps"])
 
@@ -296,6 +297,11 @@ def admin_delete(
         select(CampRegistration).where(CampRegistration.camp_id == camp_id)
     ).all():
         session.delete(r)
+    # Camp 没有 relationship 指到子表，SQLAlchemy 的 Unit of Work 不知道该
+    # 先删谁——flush 顺序不保证，万一 camps 的 DELETE 排在前面，子表还指着
+    # 它，SQLite 立即报 FK constraint failed。先手动 flush 让子行删干净，
+    # 再删 camp。
+    session.flush()
     session.delete(camp)
     session.commit()
     return Response(status_code=204)
@@ -351,7 +357,12 @@ def admin_add_problem(
     if camp is None:
         raise HTTPException(status_code=404, detail="没有这份集训")
     row = CampProblem(
-        camp_id=camp_id, platform=payload.platform, key=payload.key, position=payload.position
+        camp_id=camp_id,
+        platform=payload.platform,
+        # normalize_key 会把洛谷/CF 转大写、AtCoder 转小写、牛客加来源前缀。
+        # 不规范化的话，过题记录里的 key 和这里对不上，排行榜永远 0。
+        key=normalize_key(payload.platform, payload.key),
+        position=payload.position,
     )
     session.add(row)
     session.commit()

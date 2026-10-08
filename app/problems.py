@@ -121,6 +121,16 @@ def normalize_key(platform: str, key: str) -> str:
         # 带字母的当作主站的 uuid。
         return f"nowcoder:main:{value}"
 
+    # 洛谷和 Codeforces 的题号规范是大写：P1001、B4249、1304B、1838A。
+    # 管理员随手输小写也能查到（API 不挑），但过题记录里存的是规范大写，
+    # 按原值匹配就永远算「没过」。统一大写，让题单/集训两边对得上。
+    if platform in (Platform.LUOGU, Platform.CODEFORCES):
+        return value.upper()
+
+    # AtCoder 反过来，题号是小写：abc123_a、dp_h、agc001_f。大写会查不到。
+    if platform == Platform.ATCODER:
+        return value.lower()
+
     return value
 
 

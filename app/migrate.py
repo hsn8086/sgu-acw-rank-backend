@@ -178,6 +178,47 @@ def _rename_columns(*, check_only: bool = False) -> int:
     return changed
 
 
+def _normalize_problem_keys(*, check_only: bool = False) -> int:
+    """把洛谷/CF/AtCoder 题号统一到库里的规范大小写。
+
+    ``normalize_key`` 已经会转洛谷/CF 大写、AtCoder 小写——但那是运行时
+    行为，库里已有的非规范写法不会自动跟着改。管理员曾经输过小写洛谷
+    题号（``p1001``）进过集训，跟过题记录里的大写 ``P1001`` 对不上。
+
+    要动的表：``problem_list_items``（题单）、``problem_cache``（元信息
+    缓存）、``camp_problems``（集训）。``daily_problems`` 是 CF 题号，
+    本来就是大写，不动。
+    """
+    from sqlalchemy import text
+
+    from .problems import normalize_key
+
+    fixed = 0
+    with get_engine().begin() as connection:
+        for table in ("problem_list_items", "problem_cache", "camp_problems"):
+            rows = connection.execute(
+                text(f"SELECT id, platform, key FROM {table}")  # noqa: S608  表名是常量
+            ).all()
+            for row in rows:
+                rid, platform, key = row
+                normalized = normalize_key(platform, key)
+                if normalized == key:
+                    continue
+                if check_only:
+                    logger.warning(
+                        "%s.%s 需要规范化：%s → %s", table, rid, key, normalized
+                    )
+                    fixed += 1
+                    continue
+                connection.execute(
+                    text(f'UPDATE "{table}" SET key = :new WHERE id = :id'),  # noqa: S608
+                    {"new": normalized, "id": rid},
+                )
+                logger.info("%s.%s %s → %s", table, rid, key, normalized)
+                fixed += 1
+    return fixed
+
+
 def _widen_daily_solve_constraint(*, check_only: bool = False) -> int:
     """把「一人一天一条」放宽成「一人一天每道题一条」。
 
@@ -280,13 +321,14 @@ def run_migration(*, check_only: bool = False) -> int:
     widened = _widen_daily_solve_constraint(check_only=check_only)
 
     fixed = _fix_nowcoder_keys(check_only=check_only)
+    normalized = _normalize_problem_keys(check_only=check_only)
 
     pending = missing_columns()
     if not pending:
         logger.info("没有缺的列")
-        return renamed + widened + fixed
+        return renamed + widened + fixed + normalized
 
-    total = 0
+    total = normalized
     for table_name, columns in pending.items():
         for name, col_type in columns:
             if check_only:
