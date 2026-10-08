@@ -344,3 +344,23 @@ def test_excerpt_strips_markdown(db):
     assert "链接" in text
     assert "**" not in text
     assert "|" not in text
+
+
+def test_update_user_can_grant_post_permission(root_client):
+    """管理员能在成员管理里给成员开「可发文章」。"""
+    created = root_client.post(
+        "/api/admin/users",
+        json={"student_id": "24125023099", "display_name": "队员", "password": "pw123456"},
+    )
+    assert created.status_code in (200, 201), created.text
+    uid = created.json()["id"]
+
+    assert created.json()["can_post"] is False
+
+    res = root_client.patch(f"/api/admin/users/{uid}", json={"can_post": True})
+    assert res.status_code == 200
+    assert res.json()["can_post"] is True
+
+    res = root_client.patch(f"/api/admin/users/{uid}", json={"can_post": False})
+    assert res.status_code == 200
+    assert res.json()["can_post"] is False

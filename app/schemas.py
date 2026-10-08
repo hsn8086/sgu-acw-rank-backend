@@ -64,6 +64,8 @@ class UserAdmin(UserPublic):
 
     admin_note: str
     last_login_at: datetime | None = None
+    #: 能不能发文章（博客/公告）。管理员天然能，这里表示成员被勾了没有。
+    can_post: bool = False
 
     #: 这个成员绑定的平台账号。列表页直接显示，不用再点进详情。
     accounts: list[AdminAccountBrief] = Field(default_factory=list)
@@ -173,6 +175,8 @@ class UpdateUserAdminRequest(BaseModel):
     #: （可能是查表得来的），直接把响应的值原样 PATCH 回来不会意外把它钉成
     #: 人工覆盖。
     college_override: str | None = Field(default=None, max_length=64)
+    #: 「可发文章」开关。给成员开后他能写文章（弹窗和上下架还是管理员管）。
+    can_post: bool | None = None
     major_override: str | None = Field(default=None, max_length=64)
 
     @field_validator("role")

@@ -359,6 +359,9 @@ def update_user(
     if payload.display_name is not None:
         user.display_name = payload.display_name
 
+    if payload.can_post is not None:
+        user.can_post = payload.can_post
+
     # 空串表示恢复成按学号查表。
     if payload.college_override is not None:
         user.college_override = payload.college_override.strip() or None
