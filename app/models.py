@@ -103,6 +103,10 @@ class User(SQLModel, table=True):
     role: str = Field(default=Role.MEMBER, max_length=16, index=True)
     status: str = Field(default=UserStatus.ACTIVE, max_length=16, index=True)
 
+    #: 能发文章（博客/公告）的成员。管理员天然能发，不用勾。
+    #: 「指定成员」场景：教练、队长要写训练总结但不该有管理员权限。
+    can_post: bool = Field(default=False)
+
     #: 仅管理员可见、可改。用来记录核实过程，例如某个学号曾被他人占用。
     admin_note: str = Field(default="", max_length=2000)
 
@@ -586,6 +590,34 @@ class CampRegistration(SQLModel, table=True):
     camp_id: int = Field(foreign_key="camps.id", index=True)
     user_id: int = Field(foreign_key="users.id", index=True)
     registered_at: datetime = Field(default_factory=utcnow)
+
+
+class Post(SQLModel, table=True):
+    """一篇文章。博客和公告是同一张表——公告只是「会弹窗」的文章。
+
+    ``is_popup`` 全站最多一篇开着：开新的自动关旧的，由 posts.py 保证。
+    弹窗的版本指纹就是 ``updated_at``——内容一改时间戳就变，浏览器据此
+    决定要不要重新弹，不需要单独的版本号字段。
+    """
+
+    __tablename__ = "posts"
+
+    id: int | None = Field(default=None, primary_key=True)
+    #: URL 里的名字，如 ``100-入门指南``。唯一。
+    slug: str = Field(index=True, unique=True, max_length=200)
+    title: str = Field(max_length=200)
+    body: str = ""
+    #: 列表排序，大的在前。沿用老 content collection 的 sortOrder。
+    sort_order: int = Field(default=0)
+    author_id: int = Field(foreign_key="users.id", index=True)
+
+    is_popup: bool = Field(default=False)
+    #: 弹窗的自动下架时间。None = 手动下架才停。
+    popup_until: datetime | None = None
+    published: bool = Field(default=True, index=True)
+
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
 
 
 class ProblemCache(SQLModel, table=True):

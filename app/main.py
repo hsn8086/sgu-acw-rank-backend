@@ -29,6 +29,7 @@ from .routers import (
     daily,
     editorials,
     meta,
+    posts,
     practice,
     problemlists,
     users,
@@ -140,6 +141,7 @@ def create_app() -> FastAPI:
     app.include_router(problemlists.router, prefix=API_PREFIX)
     app.include_router(daily.router, prefix=API_PREFIX)
     app.include_router(camps.router, prefix=API_PREFIX)
+    app.include_router(posts.router, prefix=API_PREFIX)
     app.include_router(editorials.router, prefix=API_PREFIX)
     app.include_router(editorials.internal_router, prefix=API_PREFIX)
     app.include_router(admin.router, prefix=API_PREFIX)
