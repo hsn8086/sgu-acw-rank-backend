@@ -212,7 +212,6 @@ def detail_for_user(
     ended = now >= camp.end_at
 
     user_id = user.id if user else None
-    is_admin = bool(user and user.is_admin)
     registered = user_id is not None and is_registered(
         session, camp_id=camp.id or 0, user_id=user_id
     )
@@ -241,13 +240,14 @@ def detail_for_user(
         "register_reason": "",
     }
 
-    if user_id is not None and not registered and not is_admin:
+    if user_id is not None and not registered:
         ok, reason = can_register(session, camp=camp, user_id=user_id)
         result["can_register"] = ok
         result["register_reason"] = reason
 
-    # 题目和排行榜：报名后才给看；管理员始终能看（他要预览页面效果）。
-    if (registered or is_admin) and (started or is_admin):
+    # 题目和排行榜：报名且到开始时间后才给看。管理员在前台跟普通用户一样，
+    # 他要预览走 /admin/camps/* 那套独立接口。
+    if registered and started:
         meta = problem_meta(session, problems)
         result["problems"] = [
             {
