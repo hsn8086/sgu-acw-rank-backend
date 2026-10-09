@@ -188,13 +188,22 @@ def leaderboard(session: Session, camp: Camp) -> list[tuple[User, int, dict[str,
     return rows
 
 
-def problem_meta(session: Session, problems: list[CampProblem]) -> dict[str, ProblemCache]:
-    """这批题的元信息（名称、难度），一次性查。"""
-    keys = {p.key for p in problems}
+def problem_meta(
+    session: Session, problems: list[CampProblem]
+) -> dict[tuple[str, str], ProblemCache]:
+    """这批题的元信息（名称、难度），一次性查。
+
+    按 ``(platform, key)`` 对，不按 key——同一个题号在不同平台可能各有一条
+    cache（比如洛谷的 P11451 和 CF 的 P11451 撞名），只按 key 匹配会拿到
+    错误平台那行空缓存。
+    """
+    keys = {(p.platform, p.key) for p in problems}
     if not keys:
         return {}
-    rows = session.exec(select(ProblemCache).where(ProblemCache.key.in_(keys))).all()
-    return {r.key: r for r in rows}
+    rows = session.exec(
+        select(ProblemCache).where(ProblemCache.key.in_({k for _, k in keys}))
+    ).all()
+    return {(r.platform, r.key): r for r in rows if (r.platform, r.key) in keys}
 
 
 def detail_for_user(
@@ -251,18 +260,21 @@ def detail_for_user(
         meta = problem_meta(session, problems)
         # 这名报名者自己的过题集，一行一题告诉前端「我过没过」。
         my_solved = solved_keys(session, user_id or 0)
-        result["problems"] = [
-            {
-                "platform": p.platform,
-                "key": p.key,
-                "name": (meta.get(p.key).name if meta.get(p.key) else "") or "",
-                "rating": meta.get(p.key).rating if meta.get(p.key) else None,
-                # 地址现算，不用缓存里的旧值——缓存可能是旧格式。
-                "url": problem_url(p.platform, p.key),
-                "done": (p.platform, p.key) in my_solved,
-            }
-            for p in problems
-        ]
+        out_problems = []
+        for p in problems:
+            row = meta.get((p.platform, p.key))
+            out_problems.append(
+                {
+                    "platform": p.platform,
+                    "key": p.key,
+                    "name": (row.name if row else "") or "",
+                    "rating": row.rating if row else None,
+                    # 地址现算，不用缓存里的旧值——缓存可能是旧格式。
+                    "url": problem_url(p.platform, p.key),
+                    "done": (p.platform, p.key) in my_solved,
+                }
+            )
+        result["problems"] = out_problems
         result["leaderboard"] = leaderboard(session, camp)
     else:
         result["problems"] = []
