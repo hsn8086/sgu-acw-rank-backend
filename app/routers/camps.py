@@ -16,6 +16,7 @@ from .. import camps as camps_mod
 from ..deps import get_current_user, get_optional_user, get_session, require_admin
 from ..models import Camp, CampProblem, CampRegistration, User
 from ..problems import normalize_key
+from .problemlists import _fetch_and_cache
 
 router = APIRouter(tags=["camps"])
 
@@ -358,16 +359,20 @@ def admin_add_problem(
     camp = session.get(Camp, camp_id)
     if camp is None:
         raise HTTPException(status_code=404, detail="没有这份集训")
+    key = normalize_key(payload.platform, payload.key)
     row = CampProblem(
         camp_id=camp_id,
         platform=payload.platform,
         # normalize_key 会把洛谷/CF 转大写、AtCoder 转小写、牛客加来源前缀。
         # 不规范化的话，过题记录里的 key 和这里对不上，排行榜永远 0。
-        key=normalize_key(payload.platform, payload.key),
+        key=key,
         position=payload.position,
     )
     session.add(row)
     session.commit()
+    # 顺手把题名抓下来——不抓的话 problem_cache 里没这条，列表和
+    # 排行榜题号悬停都显示不了名字。
+    _fetch_and_cache(session, payload.platform, key)
     return {"ok": True, "id": row.id}
 
 
