@@ -88,6 +88,8 @@ class AdminCampDetail(CampSummary):
     created_by: int
     problems: list[AdminCampProblem]
     registrations: list[dict]
+    #: 最终榜单——管理页要能看到谁过了什么，不用翻到前台页去。
+    leaderboard: list[CampLeaderboardEntry]
 
 
 # --------------------------------------------------------------------------- #
@@ -331,6 +333,7 @@ def admin_detail(
             select(User).where(User.id.in_([r.user_id for r in registrations]))
         ).all()
     }
+    lb_rows = camps_mod.leaderboard(session, camp)
     return AdminCampDetail(
         **_to_summary(camp, session).model_dump(),
         created_by=camp.created_by,
@@ -345,6 +348,19 @@ def admin_detail(
                 "registered_at": r.registered_at.isoformat(),
             }
             for r in registrations
+        ],
+        leaderboard=[
+            CampLeaderboardEntry(
+                rank=i + 1,
+                user_id=u.id or 0,
+                display_name=u.display_name,
+                student_id=u.student_id,
+                enroll_year=u.enroll_year,
+                class_label=u.class_label,
+                solved_count=count,
+                per_problem=per_problem,
+            )
+            for i, (u, count, per_problem) in enumerate(lb_rows)
         ],
     )
 
