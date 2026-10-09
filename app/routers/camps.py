@@ -82,6 +82,9 @@ class AdminCampProblem(BaseModel):
     platform: str
     key: str
     position: int
+    #: 题名。管理员在这边也要看见，不然加错题看不出来。
+    name: str = ""
+    rating: int | None = None
 
 
 class AdminCampDetail(CampSummary):
@@ -334,13 +337,23 @@ def admin_detail(
         ).all()
     }
     lb_rows = camps_mod.leaderboard(session, camp)
+    meta = camps_mod.problem_meta(session, problems)
+
+    def _problem_out(p: CampProblem) -> AdminCampProblem:
+        row = meta.get((p.platform, p.key))
+        return AdminCampProblem(
+            id=p.id or 0,
+            platform=p.platform,
+            key=p.key,
+            position=p.position,
+            name=(row.name if row else "") or "",
+            rating=row.rating if row else None,
+        )
+
     return AdminCampDetail(
         **_to_summary(camp, session).model_dump(),
         created_by=camp.created_by,
-        problems=[
-            AdminCampProblem(id=p.id or 0, platform=p.platform, key=p.key, position=p.position)
-            for p in problems
-        ],
+        problems=[_problem_out(p) for p in problems],
         registrations=[
             {
                 "user_id": r.user_id,
@@ -419,10 +432,21 @@ def admin_reorder_problems(
     rows = session.exec(
         select(CampProblem).where(CampProblem.camp_id == camp_id).order_by(CampProblem.position)
     ).all()
-    return [
-        AdminCampProblem(id=p.id or 0, platform=p.platform, key=p.key, position=p.position)
-        for p in rows
-    ]
+    meta = camps_mod.problem_meta(session, rows)
+    out = []
+    for p in rows:
+        row = meta.get((p.platform, p.key))
+        out.append(
+            AdminCampProblem(
+                id=p.id or 0,
+                platform=p.platform,
+                key=p.key,
+                position=p.position,
+                name=(row.name if row else "") or "",
+                rating=row.rating if row else None,
+            )
+        )
+    return out
 
 
 @router.delete(
