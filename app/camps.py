@@ -249,6 +249,8 @@ def detail_for_user(
     # 他要预览走 /admin/camps/* 那套独立接口。
     if registered and started:
         meta = problem_meta(session, problems)
+        # 这名报名者自己的过题集，一行一题告诉前端「我过没过」。
+        my_solved = solved_keys(session, user_id or 0)
         result["problems"] = [
             {
                 "platform": p.platform,
@@ -257,6 +259,7 @@ def detail_for_user(
                 "rating": meta.get(p.key).rating if meta.get(p.key) else None,
                 # 地址现算，不用缓存里的旧值——缓存可能是旧格式。
                 "url": problem_url(p.platform, p.key),
+                "done": (p.platform, p.key) in my_solved,
             }
             for p in problems
         ]

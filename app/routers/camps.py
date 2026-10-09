@@ -31,6 +31,8 @@ class CampProblemOut(BaseModel):
     name: str = ""
     rating: int | None = None
     url: str = ""
+    #: 当前查看的人过了没有。未报名拿不到这个字段——题面本身都不给看。
+    done: bool = False
 
 
 class CampLeaderboardEntry(BaseModel):
