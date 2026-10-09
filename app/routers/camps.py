@@ -392,6 +392,39 @@ def admin_add_problem(
     return {"ok": True, "id": row.id}
 
 
+class ReorderRequest(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+@router.post(
+    "/admin/camps/{camp_id}/problems/reorder", response_model=list[AdminCampProblem]
+)
+def admin_reorder_problems(
+    camp_id: int,
+    payload: ReorderRequest,
+    session: Session = Depends(get_session),
+    _admin: User = Depends(require_admin),
+) -> list[AdminCampProblem]:
+    """拖拽排序集训里的题目。跟题单的 reorder 是一个模式：整个顺序提交。"""
+    camp = session.get(Camp, camp_id)
+    if camp is None:
+        raise HTTPException(status_code=404, detail="没有这份集训")
+    for index, problem_id in enumerate(payload.ids):
+        row = session.get(CampProblem, problem_id)
+        if row is None or row.camp_id != camp_id:
+            continue
+        row.position = index
+        session.add(row)
+    session.commit()
+    rows = session.exec(
+        select(CampProblem).where(CampProblem.camp_id == camp_id).order_by(CampProblem.position)
+    ).all()
+    return [
+        AdminCampProblem(id=p.id or 0, platform=p.platform, key=p.key, position=p.position)
+        for p in rows
+    ]
+
+
 @router.delete(
     "/admin/camps/{camp_id}/problems/{problem_id}", status_code=status.HTTP_204_NO_CONTENT
 )

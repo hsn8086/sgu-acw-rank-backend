@@ -114,5 +114,5 @@ def new_temporary_password() -> str:
 
 
 def new_verify_token() -> str:
-    """The ``SGU-xxxx`` string a member pastes into a platform profile."""
-    return "SGU-" + _random_code(4)
+    """The ``ACW-xxxx`` string a member pastes into a platform profile."""
+    return "ACW-" + _random_code(4)

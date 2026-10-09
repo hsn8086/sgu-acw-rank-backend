@@ -298,7 +298,7 @@ class Account(SQLModel, table=True):
     identifier: str = Field(max_length=64)
 
     verified_at: datetime | None = None
-    #: The ``SGU-xxxx`` string the member pastes into their platform profile.
+    #: The ``ACW-xxxx`` string a member pastes into their platform profile.
     verify_token: str | None = Field(default=None, max_length=32)
     verify_expires_at: datetime | None = None
     #: 上次尝试验证的时间。用于防抖：每次验证都要去平台读一次资料，连点不仅

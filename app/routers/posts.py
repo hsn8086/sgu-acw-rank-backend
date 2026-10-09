@@ -175,7 +175,7 @@ def rss(session: Session = Depends(get_session)) -> Response:
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<rss version="2.0"><channel>'
-        "<title>SGU 算法竞赛工作坊</title>"
+        "<title>算法竞赛工作坊</title>"
         "<link>https://sgu-acw.zh314.xyz/blog</link>"
         "<description>工作坊的博客与公告</description>"
         + "".join(items)

@@ -76,7 +76,7 @@ def test_invite_codes_avoid_lookalikes():
 
 def test_verify_tokens_have_prefix_and_short_body():
     token = new_verify_token()
-    assert token.startswith("SGU-")
+    assert token.startswith("ACW-")
     body = token[4:]
     assert len(body) == 4
     # Fits inside Codeforces' 16-character organization field with room to spare.

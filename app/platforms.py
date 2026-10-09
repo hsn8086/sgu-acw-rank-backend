@@ -438,7 +438,7 @@ def check_signature(platform: str, identifier: str, token: str) -> tuple[bool, s
         label = Platform.LABELS.get(platform, platform)
         return False, f"{label} 上没有找到签名字段，请先填写再验证"
 
-    # 大小写不敏感：成员可能把 SGU-xxxx 抄成小写。
+    # 大小写不敏感：成员可能把 ACW-xxxx 抄成小写。
     if token.lower() in signature.lower():
         return True, "验证通过"
     return False, "签名里没有找到验证码，请确认已保存"

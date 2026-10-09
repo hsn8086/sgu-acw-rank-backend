@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="SGU ACW Rank API",
+        title="ACW API",
         version="0.1.0",
         lifespan=lifespan,
         docs_url=f"{API_PREFIX}/docs",
