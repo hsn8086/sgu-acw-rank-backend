@@ -556,3 +556,85 @@ def test_passkey_endpoints_exist(member_client):
     assert begin.status_code == 200
     ropts = begin.json()["options"]
     assert ropts["rp"]["id"] and ropts["user"]["name"] == MEMBER_STUDENT_ID
+
+
+def test_camp_import_problems(root_client, member_client, db):
+    """批量导入：题号列表直给 + 题单拉取，重复跳过，错题收集。"""
+    from datetime import UTC, datetime, timedelta
+
+    from app.models import Camp, ProblemList, ProblemListItem
+
+    now = datetime.now(UTC)
+    with db:
+        camp = Camp(
+            name="导入测试",
+            description="",
+            start_at=now + timedelta(days=1),
+            end_at=now + timedelta(days=7),
+            register_open_at=now,
+            visible_at=now,
+            created_by=1,
+        )
+        db.add(camp)
+        # 题单（含一条已在营里的题）
+        pl = ProblemList(kind="list", title="基础题单", description="", position=0)
+        db.add(pl)
+        db.flush()
+        for i, (platform, key) in enumerate(
+            [("luogu", "P1000"), ("codeforces", "1A"), ("atcoder", "abc300_a")]
+        ):
+            db.add(ProblemListItem(list_id=pl.id, platform=platform, key=key, position=i))
+        db.commit()
+        camp_id, pl_id = camp.id, pl.id
+
+    # 先手动加一道——等下导入要跳过它
+    add = root_client.post(
+        f"/api/admin/camps/{camp_id}/problems",
+        json={"platform": "luogu", "key": "P1000"},
+    )
+    assert add.status_code == 201
+
+    # 题单整单导入：P1000 跳过，另两道进来
+    imp = root_client.post(
+        f"/api/admin/camps/{camp_id}/problems/import",
+        json={"problem_list_id": pl_id},
+    )
+    assert imp.status_code == 200, imp.text
+    assert imp.json()["added"] == 2
+    assert imp.json()["skipped"] == 1
+
+    # 直给 items：新的进、重复跳、非法的进 failed
+    imp2 = root_client.post(
+        f"/api/admin/camps/{camp_id}/problems/import",
+        json={
+            "items": [
+                {"platform": "luogu", "key": "P1001"},
+                {"platform": "luogu", "key": "P1000"},   # 重复
+                {"platform": "bogus", "key": "x"},       # 非法平台
+                {"platform": "codeforces", "key": " "},  # 空 key
+            ]
+        },
+    )
+    assert imp2.status_code == 200
+    assert imp2.json()["added"] == 1
+    assert imp2.json()["skipped"] == 1
+    assert len(imp2.json()["failed"]) == 2
+
+    # 空集拒
+    assert (
+        root_client.post(
+            f"/api/admin/camps/{camp_id}/problems/import", json={"items": []}
+        ).status_code
+        == 422
+    )
+    # 不存在的题单拒
+    assert (
+        root_client.post(
+            f"/api/admin/camps/{camp_id}/problems/import", json={"problem_list_id": 999}
+        ).status_code
+        == 404
+    )
+
+    detail = root_client.get(f"/api/admin/camps/{camp_id}").json()
+    keys = {p["key"] for p in detail["problems"]}
+    assert keys == {"P1000", "1A", "abc300_a", "P1001"}

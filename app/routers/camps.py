@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -23,6 +24,8 @@ from ..models import (
     CampProblem,
     CampRegistration,
     Platform,
+    ProblemList,
+    ProblemListItem,
     Role,
     User,
 )
@@ -554,6 +557,113 @@ def admin_add_problem(
     # 排行榜题号悬停都显示不了名字。
     _fetch_and_cache(session, payload.platform, key)
     return {"ok": True, "id": row.id}
+
+
+class ProblemImport(BaseModel):
+    """批量导入题目。
+
+    两种给法都收：
+    - ``items``：直接给题号列表（前端把粘贴文本解析好再传）
+    - ``problem_list_id``：从已有题单整单拉题；合集会把里面所有题单的题
+      一起拉平
+
+    重复的就跳过，别一条报错把整个导入打死。
+    """
+
+    items: list[ProblemAdd] = Field(default_factory=list)
+    problem_list_id: int | None = None
+
+
+@router.post("/admin/camps/{camp_id}/problems/import")
+def admin_import_problems(
+    camp_id: int,
+    payload: ProblemImport,
+    session: Session = Depends(get_session),
+    _admin: User = Depends(require_admin),
+) -> dict:
+    camp = session.get(Camp, camp_id)
+    if camp is None:
+        raise HTTPException(status_code=404, detail="没有这份集训")
+    require_editable(camp)
+
+    # 汇总题目源：题单/合集里的 + 直接给的，保持原有顺序。
+    source: list[tuple[str, str]] = []
+    if payload.problem_list_id is not None:
+        pl = session.get(ProblemList, payload.problem_list_id)
+        if pl is None:
+            raise HTTPException(status_code=404, detail="题单不存在")
+        lists = [pl]
+        if pl.is_collection:
+            lists = list(
+                session.exec(
+                    select(ProblemList).where(ProblemList.collection_id == pl.id)
+                ).all()
+            )
+            if not lists:
+                raise HTTPException(status_code=422, detail="合集里没有题单")
+        for lst in lists:
+            for item in session.exec(
+                select(ProblemListItem)
+                .where(ProblemListItem.list_id == lst.id)
+                .order_by(ProblemListItem.position)  # type: ignore[attr-defined]
+            ).all():
+                source.append((item.platform, item.key))
+    for it in payload.items:
+        source.append((it.platform, it.key))
+    if not source:
+        raise HTTPException(status_code=422, detail="没有可导入的题")
+
+    existing = {
+        (p.platform, p.key)
+        for p in session.exec(select(CampProblem).where(CampProblem.camp_id == camp_id)).all()
+    }
+    last = session.exec(
+        select(CampProblem)
+        .where(CampProblem.camp_id == camp_id)
+        .order_by(CampProblem.position.desc())
+        .limit(1)
+    ).first()
+    pos = last.position + 1 if last else 0
+
+    added_keys: list[tuple[str, str]] = []
+    skipped = 0
+    failed: list[str] = []
+    for platform, raw_key in source:
+        if platform not in Platform.ALL:
+            failed.append(f"{platform}:{raw_key}")
+            continue
+        key = normalize_key(platform, raw_key)
+        if not key or len(key) > 128:
+            failed.append(f"{platform}:{raw_key}")
+            continue
+        if (platform, key) in existing:
+            skipped += 1
+            continue
+        session.add(
+            CampProblem(camp_id=camp_id, platform=platform, key=key, position=pos)
+        )
+        pos += 1
+        added_keys.append((platform, key))
+        existing.add((platform, key))
+
+    if added_keys:
+        session.flush()
+        camps_mod.boost_accounts(session, camp)
+        session.commit()
+
+        # 抓题名，但给整个导入限 25s——题多的时候不能卡在抓题上超时。
+        # 漏掉的由后面的按需抓取补齐。
+        deadline = time.time() + 25
+        for platform, key in added_keys:
+            if time.time() > deadline:
+                break
+            _fetch_and_cache(session, platform, key)
+
+    return {
+        "added": len(added_keys),
+        "skipped": skipped,
+        "failed": failed,
+    }
 
 
 class ReorderRequest(BaseModel):
