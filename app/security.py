@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import time
 
 from .config import get_settings
 
@@ -116,3 +117,40 @@ def new_temporary_password() -> str:
 def new_verify_token() -> str:
     """The ``ACW-xxxx`` string a member pastes into a platform profile."""
     return "ACW-" + _random_code(4)
+
+
+# --------------------------------------------------------------------------- #
+# 两步验证登录票据
+#
+# 密码对了但还没过 TOTP 的中间态——不能发 session，用一张带签名的短票记录
+# 「这个 uid 已经过了密码关」，等 TOTP 验完才发真 session。
+# --------------------------------------------------------------------------- #
+
+TICKET_TTL_SECONDS = 300
+
+
+def new_login_ticket(user_id: int) -> str:
+    """签发一张登录票据：``uid.exp.sig``，有效期 5 分钟。"""
+    exp = int(time.time()) + TICKET_TTL_SECONDS
+    body = f"{user_id}.{exp}"
+    sig = hmac.new(
+        get_settings().ticket_secret.encode(), body.encode(), hashlib.sha256
+    ).hexdigest()
+    return f"{body}.{sig}"
+
+
+def verify_login_ticket(ticket: str) -> int | None:
+    """校验票据，返回 user_id；过期或签名不对返回 None。"""
+    try:
+        uid_s, exp_s, sig = ticket.rsplit(".", 2)
+        uid, exp = int(uid_s), int(exp_s)
+    except (ValueError, AttributeError):
+        return None
+    expected = hmac.new(
+        get_settings().ticket_secret.encode(), f"{uid_s}.{exp_s}".encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        return None
+    if exp < time.time():
+        return None
+    return uid

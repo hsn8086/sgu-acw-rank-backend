@@ -17,7 +17,15 @@ from __future__ import annotations
 
 from sqlmodel import Session, select
 
-from .models import Account, DailyProgress, InviteUse, RefreshQuota, SolvedSnapshot
+from .models import (
+    Account,
+    CampRegistration,
+    DailyProgress,
+    InviteUse,
+    NotificationRead,
+    RefreshQuota,
+    SolvedSnapshot,
+)
 
 
 def delete_account_data(db: Session, account_id: int) -> int:
@@ -46,10 +54,15 @@ def delete_user_accounts(db: Session, user_id: int) -> int:
 def delete_user_references(db: Session, user_id: int) -> None:
     """删掉指向该成员的其余记录。
 
-    ``invite_uses`` 与 ``refresh_quotas`` 都带外键指向 users，不先清掉的话
-    删用户会被数据库拦下。这两张表是后来加的，很容易漏。
+    ``invite_uses``、``refresh_quotas``、``camp_registrations`` 和
+    ``notification_reads`` 都带外键指向 users，不先清掉的话删用户会被
+    数据库拦下。
     """
     for row in db.exec(select(InviteUse).where(InviteUse.user_id == user_id)).all():
         db.delete(row)
     for row in db.exec(select(RefreshQuota).where(RefreshQuota.user_id == user_id)).all():
+        db.delete(row)
+    for row in db.exec(select(CampRegistration).where(CampRegistration.user_id == user_id)).all():
+        db.delete(row)
+    for row in db.exec(select(NotificationRead).where(NotificationRead.user_id == user_id)).all():
         db.delete(row)

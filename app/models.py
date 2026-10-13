@@ -103,6 +103,11 @@ class User(SQLModel, table=True):
     role: str = Field(default=Role.MEMBER, max_length=16, index=True)
     status: str = Field(default=UserStatus.ACTIVE, max_length=16, index=True)
 
+    #: TOTP 两步验证的密钥（base32）。有值 = 已开启。
+    totp_secret: str | None = None
+    #: 开启流程里还没验证过的半成品密钥——verify 通过才转正。
+    totp_pending_secret: str | None = None
+
     #: 能发文章（博客/公告）的成员。管理员天然能发，不用勾。
     #: 「指定成员」场景：教练、队长要写训练总结但不该有管理员权限。
     can_post: bool = Field(default=False)
@@ -135,6 +140,11 @@ class User(SQLModel, table=True):
     def major_name(self) -> str | None:
         """专业名。同上。"""
         return self.major_override or academic.major_name(self.college_code, self.major_code)
+
+    @property
+    def totp_enabled(self) -> bool:
+        """两步验证开关状态。``totp_secret`` 有值就算开。"""
+        return self.totp_secret is not None
 
     @property
     def class_label(self) -> str | None:
@@ -344,6 +354,11 @@ class Account(SQLModel, table=True):
     consecutive_failures: int = Field(default=0)
     rating_failures: int = Field(default=0)
 
+    #: 账号状态标记。``None`` 正常；``privacy`` 表示开了平台隐私保护，
+    #: ``unverified`` 表示未实名——这两种不是抓取失败，是账号自己的配置
+    #: 状态，不进入失败重试，在界面上标出来提示本人处理。
+    sync_flag: str | None = Field(default=None, max_length=32)
+
     created_at: datetime = Field(default_factory=utcnow)
 
     user: User | None = Relationship(back_populates="accounts")
@@ -544,8 +559,8 @@ class DailyProblemSolve(SQLModel, table=True):
 class Camp(SQLModel, table=True):
     """一次集训。
 
-    ``start_at`` 是题目可看、算分开始的时间；``end_at`` 是报名截止、算分
-    截止的时间。过了 ``end_at`` 之后，不管谁再过题都不算进这份集训。
+    ``start_at`` 是题目开放时间；``end_at`` 关闭报名，启动最终同步。
+    历史完成也计分，最终同步成功后从 CampFinalization 读取固定成绩。
     """
 
     __tablename__ = "camps"
@@ -555,6 +570,16 @@ class Camp(SQLModel, table=True):
     description: str = ""
     start_at: datetime
     end_at: datetime
+
+    #: 开放报名 / 开始显示的**绝对时间**。``None`` 表示走相对偏移。
+    #: 两个字段互斥地和自己的 ``*_days`` 配对：``_at`` 非空 = 绝对模式。
+    register_open_at: datetime | None = None
+    #: 相对模式：开始前多少天开放报名。默认 3。
+    register_open_days: int | None = 3
+    visible_at: datetime | None = None
+    #: 相对模式：开始前多少天开始显示。默认 3。
+    visible_days: int | None = 3
+
     created_by: int = Field(foreign_key="users.id", index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -590,6 +615,63 @@ class CampRegistration(SQLModel, table=True):
     camp_id: int = Field(foreign_key="camps.id", index=True)
     user_id: int = Field(foreign_key="users.id", index=True)
     registered_at: datetime = Field(default_factory=utcnow)
+
+
+class CampFinalization(SQLModel, table=True):
+    """截止后的结算任务。名单和题目在任务开始时固定，成功同步后封榜。"""
+
+    __tablename__ = "camp_finalizations"
+    camp_id: int = Field(primary_key=True, foreign_key="camps.id")
+    started_at: datetime = Field(default_factory=utcnow)
+    finalized_at: datetime | None = None
+    participants_json: str = "[]"
+    problems_json: str = "[]"
+    standings_json: str = "[]"
+
+
+class CampAccountResult(SQLModel, table=True):
+    """一个报名账号的最终同步结果；首次成功后不再覆盖。
+
+    account_id 保留为历史标识，不设外键，解绑不能擦除已取得的成绩。
+    """
+
+    __tablename__ = "camp_account_results"
+    __table_args__ = (UniqueConstraint("camp_id", "account_id", name="uq_camp_account_result"),)
+    id: int | None = Field(default=None, primary_key=True)
+    camp_id: int = Field(foreign_key="camps.id", index=True)
+    account_id: int = Field(index=True)
+    user_id: int
+    platform: str
+    completed_at: datetime | None = None
+    solved_json: str = "[]"
+
+
+class AdminNotification(SQLModel, table=True):
+    """所有管理员共享的故障会话；同一故障合并，恢复后可再次打开。"""
+
+    __tablename__ = "admin_notifications"
+    id: int | None = Field(default=None, primary_key=True)
+    fingerprint: str = Field(unique=True, index=True, max_length=200)
+    title: str
+    body: str
+    href: str = "/admin"
+    occurrences: int = 1
+    revision: int = 1
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+    resolved_at: datetime | None = None
+
+
+class NotificationRead(SQLModel, table=True):
+    """每个管理员单独记录已读版本，故障恢复或复发时重新提醒。"""
+
+    __tablename__ = "notification_reads"
+    __table_args__ = (UniqueConstraint("notification_id", "user_id", name="uq_notification_read"),)
+    id: int | None = Field(default=None, primary_key=True)
+    notification_id: int = Field(foreign_key="admin_notifications.id", index=True)
+    # 历史已读记录不阻止用户删除；权限始终按当前会话判断。
+    user_id: int = Field(index=True)
+    revision: int
 
 
 class Post(SQLModel, table=True):
@@ -855,4 +937,152 @@ class ProblemListItem(SQLModel, table=True):
     #: 出题人想加的话可以写点提示。
     note: str = Field(default="", max_length=500)
 
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class WorkshopStatusOverride(SQLModel, table=True):
+    """工作坊状态的手动覆盖。
+
+    开门/关门来自树莓派心跳，那是自动的；但「赛事占用」「临时闭馆」这种
+    状态心跳说不出来——门开着不代表能进去。管理员在这里写一条，前端优先
+    显示它，到期自动失效（``until`` 为空则直到手动关闭）。
+    """
+
+    __tablename__ = "workshop_status_override"
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    #: 状态词，如「赛事占用」。显示在状态卡大字号位置。
+    label: str = Field(max_length=40)
+
+    #: 补充说明，显示在状态词旁边的小字。
+    note: str = Field(default="", max_length=200)
+
+    active: bool = Field(default=True)
+
+    #: 生效起点。``None`` 表示立即生效；填了就成为排期里的一条，到点才显示。
+    start_at: datetime | None = None
+
+    #: 生效终点。过了就当作没有覆盖，不用手动回来关。``None`` 表示直到手动关闭。
+    until: datetime | None = None
+
+    updated_at: datetime = Field(default_factory=utcnow)
+    updated_by: int = Field(foreign_key="users.id")
+
+
+class PushSubscription(SQLModel, table=True):
+    """一个浏览器的 Web Push 订阅。
+
+    一个成员可能在多台设备上开通知——手机一台、电脑一台，所以 endpoint
+    是天然的唯一键而不是 user_id。浏览器到期没续订会返回 404/410，
+    发送时顺手清掉，表不会一直变大。
+    """
+
+    __tablename__ = "push_subscriptions"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+
+    #: 浏览器分配的推送地址，全表唯一。
+    endpoint: str = Field(unique=True, max_length=1000)
+    #: 订阅密钥对，浏览器生成、推送时加密用。
+    p256dh: str = Field(max_length=255)
+    auth: str = Field(max_length=255)
+
+    user_agent: str = Field(default="", max_length=300)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class Signup(SQLModel, table=True):
+    """线下活动报名。
+
+    管理员建一个「报名」：标题、说明、开放/截止时间、名额、自定义表单字段。
+    表单字段存在 ``fields_json``，类型见 routers/signups.py 的校验——
+    文本、数字、单选、复选、长文本，够线下赛收集了。
+    """
+
+    __tablename__ = "signups"
+
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(max_length=100)
+    description: str = Field(default="", max_length=5000)
+
+    #: 报名前置条件：这些平台的账号**都**要绑定并验证。
+    #: 空数组 = 不设条件。JSON 数组，如 ``["luogu", "codeforces"]``。
+    required_platforms_json: str = "[]"
+
+    #: 报名前置条件：仅限这些入学年级。空数组 = 不限。
+    required_years_json: str = "[]"
+
+    #: 表单字段定义，JSON 数组。
+    fields_json: str = "[]"
+
+    open_at: datetime = Field(index=True)
+    close_at: datetime | None = None
+
+    #: 名额上限。``None`` 不限。
+    capacity: int | None = None
+
+    created_by: int = Field(foreign_key="users.id", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class SignupEntry(SQLModel, table=True):
+    """一条报名记录。一人一场一条——改答案是覆盖原记录。"""
+
+    __tablename__ = "signup_entries"
+    __table_args__ = (UniqueConstraint("signup_id", "user_id", name="uq_signup_entry"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    signup_id: int = Field(foreign_key="signups.id", index=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+
+    #: ``{字段key: 值}``。
+    answers_json: str = "{}"
+
+    created_at: datetime = Field(default_factory=utcnow)
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class PasskeyCredential(SQLModel, table=True):
+    """一个成员注册的通行密钥（platform authenticator / 安全密钥）。
+
+    ``credential_id`` 是浏览器给的凭据标识，唯一；``public_key`` 是 COSE
+    编码的公钥，签名验证要用。两者都是 base64url 文本存放——没有保密必要，
+    泄出去也没法签名。
+    """
+
+    __tablename__ = "passkey_credentials"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+
+    #: base64url 编码的 credential id，全网唯一。
+    credential_id: str = Field(index=True, unique=True)
+    #: base64url 编码的 COSE 公钥。
+    public_key: str
+    #: 签名计数器，验证器递增——克隆的密钥会停在旧值，原值更高就是异常。
+    sign_count: int = Field(default=0)
+    #: 设备接受的 transport（internal/nfc/usb…），逗号连接，展示用。
+    transports: str = ""
+    #: 管理员/成员给这台设备起的名字。
+    name: str = Field(default="", max_length=80)
+
+    created_at: datetime = Field(default_factory=utcnow)
+    last_used_at: datetime | None = None
+
+
+class WebAuthnChallenge(SQLModel, table=True):
+    """WebAuthn 一次性挑战。注册和登录共用——登录的挑战不带 user_id，
+    验证完按 credential_id 找回人。过期的一次性行会被顺带清掉。"""
+
+    __tablename__ = "webauthn_challenges"
+
+    #: base64url 编码的挑战值，主键。
+    challenge: str = Field(primary_key=True)
+    #: 注册时带上发起人；登录时不知道是谁，为空。
+    user_id: int | None = Field(default=None, foreign_key="users.id", index=True)
+    #: register / login
+    kind: str = "register"
+    expires_at: datetime
     created_at: datetime = Field(default_factory=utcnow)

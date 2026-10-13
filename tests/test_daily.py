@@ -68,7 +68,7 @@ def member_client(env, root_client):
         json={
             "student_id": MEMBER_STUDENT_ID,
             "password": MEMBER_PASSWORD,
-            "display_name": "谢泽栩",
+            "display_name": "队员甲",
         },
     )
     assert response.status_code in (200, 201), response.text
@@ -476,9 +476,7 @@ def test_ensure_daily_force_redraws(env):
         before = [r.key for r in daily.ensure_daily(session, day="2026-03-01")]
         after = [
             r.key
-            for r in daily.ensure_daily(
-                session, day="2026-03-01", force=True, salt="redraw-1"
-            )
+            for r in daily.ensure_daily(session, day="2026-03-01", force=True, salt="redraw-1")
         ]
 
         assert before != after
@@ -900,13 +898,19 @@ def test_record_solves_is_idempotent(env):
         keys = {(rows[0].platform, rows[0].key)}
         uid = make_user(session, "24125023099")
 
-        assert daily.record_solves(
-            session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
-        ) == 1
+        assert (
+            daily.record_solves(
+                session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
+            )
+            == 1
+        )
         # 第二次不该再记。
-        assert daily.record_solves(
-            session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
-        ) == 0
+        assert (
+            daily.record_solves(
+                session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
+            )
+            == 0
+        )
         board = daily.checkin_leaderboard(session)
         assert len(board) == 1
         assert board[0].user_id == uid
@@ -932,9 +936,12 @@ def test_record_solves_records_each_problem(env):
         keys = {(rows[0].platform, rows[0].key), (rows[1].platform, rows[1].key)}
         uid = make_user(session, "24125023099")
 
-        assert daily.record_solves(
-            session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
-        ) == 2
+        assert (
+            daily.record_solves(
+                session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=keys
+            )
+            == 2
+        )
 
         stored = session.exec(
             select(DailyProblemSolve).where(DailyProblemSolve.user_id == uid)
@@ -943,9 +950,12 @@ def test_record_solves_records_each_problem(env):
 
         # 再补做第三道，只新增一条。
         all_keys = keys | {(rows[2].platform, rows[2].key)}
-        assert daily.record_solves(
-            session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=all_keys
-        ) == 1
+        assert (
+            daily.record_solves(
+                session, user_id=uid, account_id=None, day="2026-03-01", solved_keys=all_keys
+            )
+            == 1
+        )
         # 签到天数仍然是一天——同一天做几道只算一次签到。
         board = daily.checkin_leaderboard(session)
         assert board[0].days == 1
@@ -1254,14 +1264,8 @@ def test_normalize_nowcoder_keeps_existing_prefix(env):
     from app.models import Platform
     from app.problems import normalize_key
 
-    assert (
-        normalize_key(Platform.NOWCODER, "nowcoder:contest:233234")
-        == "nowcoder:contest:233234"
-    )
-    assert (
-        normalize_key(Platform.NOWCODER, "nowcoder:main:abc-123")
-        == "nowcoder:main:abc-123"
-    )
+    assert normalize_key(Platform.NOWCODER, "nowcoder:contest:233234") == "nowcoder:contest:233234"
+    assert normalize_key(Platform.NOWCODER, "nowcoder:main:abc-123") == "nowcoder:main:abc-123"
 
 
 def test_normalize_nowcoder_uuid_goes_to_main(env):
@@ -1304,8 +1308,7 @@ def test_nowcoder_url_accepts_all_key_forms(env):
 
     for key in ("nowcoder:contest:233234", "contest:233234", "233234"):
         assert (
-            problem_url(Platform.NOWCODER, key)
-            == "https://ac.nowcoder.com/acm/problem/233234"
+            problem_url(Platform.NOWCODER, key) == "https://ac.nowcoder.com/acm/problem/233234"
         ), f"{key} 没拼对"
 
     for key in ("nowcoder:main:abc-123", "main:abc-123"):
@@ -1342,10 +1345,7 @@ def test_atcoder_url_handles_contest_without_digits(env):
     from app.models import Platform
     from app.problems import problem_url
 
-    assert (
-        problem_url(Platform.ATCODER, "dp_h")
-        == "https://atcoder.jp/contests/dp/tasks/dp_h"
-    )
+    assert problem_url(Platform.ATCODER, "dp_h") == "https://atcoder.jp/contests/dp/tasks/dp_h"
 
 
 def test_atcoder_url_handles_digits_at_the_end(env):
@@ -1489,14 +1489,20 @@ def test_solvers_orders_by_record_time(root_client, env):
         # 没法在测试里分出先后。
         session.add(
             DailyProblemSolve(
-                user_id=late, day="2026-03-01", platform=target_platform,
-                key=target_key, created_at=now,
+                user_id=late,
+                day="2026-03-01",
+                platform=target_platform,
+                key=target_key,
+                created_at=now,
             )
         )
         session.add(
             DailyProblemSolve(
-                user_id=early, day="2026-03-01", platform=target_platform,
-                key=target_key, created_at=now - timedelta(minutes=10),
+                user_id=early,
+                day="2026-03-01",
+                platform=target_platform,
+                key=target_key,
+                created_at=now - timedelta(minutes=10),
             )
         )
         session.commit()
@@ -1512,3 +1518,38 @@ def test_solvers_empty_day(root_client, env):
     board = root_client.get("/api/daily/solvers?day=2020-01-01").json()
     assert board["day"] == "2020-01-01"
     assert board["problems"] == []
+
+
+def test_checkin_days_counts_distinct_days(member_client, env):
+    """一天过两道只算一天：累计签到按不同的天数，不按过题行数。"""
+    from app import daily
+    from app.db import get_engine
+    from tests.test_camps import MEMBER_STUDENT_ID, user_id_of
+
+    with Session(get_engine()) as session:
+        seed_problems(
+            session,
+            [p for band in daily.BAND_ORDER for p in make_pool(band, 5)],
+        )
+        uid = user_id_of(session, MEMBER_STUDENT_ID)
+
+        day1 = daily.ensure_daily(session, day="2026-03-01")
+        day2 = daily.ensure_daily(session, day="2026-03-02")
+        # 第一天过两道、第二天过一道：签到累计应为 2 天，不是 3。
+        daily.record_solves(
+            session,
+            user_id=uid,
+            account_id=None,
+            day="2026-03-01",
+            solved_keys={(day1[0].platform, day1[0].key), (day1[1].platform, day1[1].key)},
+        )
+        daily.record_solves(
+            session,
+            user_id=uid,
+            account_id=None,
+            day="2026-03-02",
+            solved_keys={(day2[0].platform, day2[0].key)},
+        )
+
+    body = member_client.get("/api/daily").json()
+    assert body["checkin_days"] == 2

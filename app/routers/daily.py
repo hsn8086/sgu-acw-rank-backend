@@ -105,8 +105,9 @@ def _checkin_stats(session: Session, user: User | None, day: str) -> dict:
     if user is None or not user.id:
         return {}
 
+    # 一人一天可以命中多道每日一题（每题一行），累计签到要按不同的天数算。
     total = session.exec(
-        select(func.count(DailyProblemSolve.id)).where(  # type: ignore[arg-type]
+        select(func.count(func.distinct(DailyProblemSolve.day))).where(  # type: ignore[arg-type]
             DailyProblemSolve.user_id == user.id
         )
     ).one()

@@ -59,11 +59,18 @@ DEFAULT_TIMEOUT = httpx.Timeout(15.0, connect=8.0)
 
 
 class FetchError(Exception):
-    """读不到资料。``not_found`` 用来区分「账号不存在」和「网络/解析问题」。"""
+    """读不到资料。``not_found`` 用来区分「账号不存在」和「网络/解析问题」。
 
-    def __init__(self, message: str, *, not_found: bool = False) -> None:
+    ``kind`` 是配置类错误：账号本身在，但它当前不可统计（隐私保护、未实名）。
+    这类错误重试没有意义，同步层把它们记为「账号挂了标记」，而不是失败。
+    """
+
+    def __init__(
+        self, message: str, *, not_found: bool = False, kind: str | None = None
+    ) -> None:
         super().__init__(message)
         self.not_found = not_found
+        self.kind = kind
 
 
 @dataclass(slots=True)
@@ -191,7 +198,10 @@ def _luogu_get(client: httpx.Client, url: str) -> str:
     if second.status_code == 404:
         raise FetchError("洛谷上没有这个用户", not_found=True)
     if second.status_code != 200:
-        raise FetchError(_luogu_error(second))
+        message = _luogu_error(second)
+        # 未实名是配置问题：账号在，但平台不给统计数据，重试没意义。
+        kind = "unverified" if "实名" in message else None
+        raise FetchError(message, kind=kind)
     return second.text
 
 
@@ -534,6 +544,10 @@ def fetch_solved_luogu(client: httpx.Client, identifier: str) -> SolvedSet:
 
     page = _luogu_get(client, f"https://www.luogu.com.cn/user/{identifier}/practice")
     data = (_luogu_context(page).get("data")) or {}
+    if data.get("privacy") is True:
+        # 开了隐私保护的账号接口直接给空列表。这不是抓取失败，是账号
+        # 自身的配置状态——打标记提示本人关掉，不进入失败重试。
+        raise FetchError("该用户开启了洛谷隐私保护，请关闭后再同步", kind="privacy")
     passed = data.get("passed")
     if passed is None:
         # privacy=True 的用户会返回空列表，这与「一题没做」无法区分。

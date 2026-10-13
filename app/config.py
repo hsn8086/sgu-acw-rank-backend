@@ -48,6 +48,23 @@ class Settings(BaseSettings):
     # quality regression can be traced back to a model switch.
     editorial_model: str = "deepseek-flash"
 
+    # Web Push VAPID keys. ``vapid-gen`` 生成一次写进 env 就行，别放代码里。
+    # 空 = 推送功能降级为不可用，其余一切照常。
+    vapid_private_key: str = ""
+    vapid_public_key: str = ""
+    #: 标准要求的归属标识：mailto: 或 https:。
+    vapid_subject: str = "mailto:admin@sgu-acw.zh314.xyz"
+
+    # WebAuthn（通行密钥）的依赖方参数。本地开发换 localhost 需改这三个。
+    rp_id: str = "sgu-acw.zh314.xyz"
+    rp_name: str = "算法竞赛工作坊"
+    rp_origin: str = "https://sgu-acw.zh314.xyz"
+
+    # 两步验证登录票据的签名密钥。密码正确但还没过 TOTP 时下发——
+    # 不能直接发卡话，得等二次校验；票据就是这段中间态的凭据。
+    # 生产必须换成随机串：拿到密钥=绕过 TOTP。
+    ticket_secret: str = "sgu-acw-dev-ticket-secret"
+
     # First-run bootstrap. When the password is set and no user carries this
     # student id yet, a root account is created. Ignored on every later start.
     #

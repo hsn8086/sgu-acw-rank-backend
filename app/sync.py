@@ -24,18 +24,18 @@ from datetime import date, timedelta
 
 from sqlmodel import Session, select
 
-from . import daily, daytime, editorials
+from . import camps, daily, daytime, editorials, notifications
+from . import posts as posts_mod
 from .config import get_settings
 from .db import get_engine, init_db, session_scope
 from .models import (
     Account,
-    Camp,
-    CampRegistration,
     DailyProblem,
     DailyProgress,
     Platform,
     SolvedSnapshot,
     SyncRun,
+    User,
     utcnow,
 )
 from .platforms import FetchError, SolvedSet, fetch_profile, fetch_solved
@@ -49,7 +49,9 @@ logger = logging.getLogger("sgu_acw.sync")
 MAX_BACKFILL_DAYS = 7
 
 #: 保留多少天的历史。榜单只看最近一段时间，多余的删掉控制库大小。
-RETENTION_DAYS = 400
+#: 1500 天约四年，覆盖成员入学到现在的全部过题史——CF/牛客全量拉
+#: 本来就带来时间戳，写长窗口不增加任何平台请求。
+RETENTION_DAYS = 1500
 
 
 # 「一天」的定义在 daytime 里，每日一题那边也要用同一套。这里保留
@@ -226,6 +228,7 @@ def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple
     now = utcnow()
     settings = get_settings()
 
+    force = force or camps.final_sync_due(db, account, now)
     if not force and not account.is_due(
         now=now,
         base=settings.sync_interval_base_minutes * 60,
@@ -238,10 +241,26 @@ def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple
     except FetchError as exc:
         # 失败也要记时间，否则下次唤醒会立刻重试，一个持续失败的账号会
         # 每五分钟撞一次墙。但重试间隔要退避：失败次数越多等得越久。
+        account.solved_fetched_at = now
+        if exc.kind:
+            # 配置类错误（隐私保护、未实名）：账号在但当前不可统计。
+            # 记成功 + 打标记，不进入失败退避，也不刷屏站内信——本人
+            # 或管理员在账号列表能看到标记。
+            account.sync_flag = exc.kind
+            account.consecutive_failures = 0
+            account.last_error = str(exc)[:500]
+            db.add(account)
+            return True, str(exc), 0
+
         account.consecutive_failures += 1
         account.last_error = str(exc)[:500]
-        account.solved_fetched_at = now
         db.add(account)
+        owner = db.get(User, account.user_id)
+        owner_name = owner.display_name if owner else f"#{account.user_id}"
+        notifications.report(db, f"sync:{account.id}", "平台成绩同步失败",
+            f"{owner_name} 的 {Platform.LABELS.get(account.platform, account.platform)} "
+            f"账号 {account.identifier} 同步失败（{str(exc)[:80]}），已安排重试。",
+            "/admin")
         return False, str(exc), 0
 
     if account.platform == Platform.LUOGU:
@@ -261,6 +280,7 @@ def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple
     account.solved_fetched_at = now
     account.last_error = None
     account.consecutive_failures = 0
+    account.sync_flag = None
     # 只有真的拓到新题才算「活跃」。否则一个不做题的人会因为反复查看而
     # 一直停留在高频档位。
     if added > 0:
@@ -268,6 +288,8 @@ def sync_account(db: Session, account: Account, *, force: bool = False) -> tuple
     db.add(account)
 
     _record_daily_checkin(db, account, solved)
+    camps.record_final_sync(db, account, solved, now)
+    notifications.resolve(db, f"sync:{account.id}")
 
     return True, detail, added
 
@@ -383,41 +405,9 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
     """
     init_db()
 
-    # 先把该抓哪些账号定下来，单独一个短事务。
-    #
-    # 顺带处理「刚截止的集训」：end_at 落在最近两次唤醒之间的集训，把
-    # 所有报名账号的 solved_fetched_at 清成 None——排行榜算的是截止那
-    # 一刻的已解决状态，得在截止后立刻把这些账号刷一遍才准。窗口给
-    # 15 分钟而不是恰好一个 tick：timer 漂移、sync 偶尔慢一步都不至于
-    # 漏掉；重复清 None 是幂等的。
+    # 持久化结算任务，无时间窗口限制；停机恢复后继续未完成的账号。
     with session_scope() as db:
-        now = utcnow()
-        cutoff = now - timedelta(minutes=15)
-        ended_camps = db.exec(
-            select(Camp).where(Camp.end_at <= now, Camp.end_at > cutoff)
-        ).all()
-        for camp in ended_camps:
-            regs = db.exec(
-                select(CampRegistration).where(CampRegistration.camp_id == camp.id)
-            ).all()
-            user_ids = [r.user_id for r in regs]
-            if not user_ids:
-                continue
-            needed_accounts = db.exec(
-                select(Account).where(
-                    Account.user_id.in_(user_ids),  # type: ignore[attr-defined]
-                    Account.verified_at.is_not(None),  # type: ignore[union-attr]
-                )
-            ).all()
-            for acc in needed_accounts:
-                acc.solved_fetched_at = None
-                db.add(acc)
-            logger.info(
-                "camp %s ended: marked %d account(s) for immediate sync",
-                camp.name,
-                len(needed_accounts),
-            )
-
+        camps.prepare_finalizations(db)
         statement = select(Account).where(Account.verified_at.is_not(None))  # type: ignore[union-attr]
         if platforms:
             statement = statement.where(Account.platform.in_(platforms))  # type: ignore[attr-defined]
@@ -462,6 +452,9 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
             # rating 与过题数分开调度，各有各的周期。
             sync_rating(db, account, force=force)
 
+    with session_scope() as db:
+        camps.finish_finalizations(db)
+
     # 只有真的抓了账号才记一行。每五分钟唤醒一次的话，每次都记会攒出十万
     # 行／年的噪音，而绝大多数唤醒是空跑。
     if fetched:
@@ -497,9 +490,25 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
     try:
         with session_scope() as db:
             drawn = daily.ensure_daily(db)
-        logger.info("daily problems ready: %s", ", ".join(r.key for r in drawn))
+            drawn_keys = [row.key for row in drawn]
+        logger.info("daily problems ready: %s", ", ".join(drawn_keys))
+        with session_scope() as db:
+            notifications.resolve(db, "daily-draw")
     except Exception:  # noqa: BLE001 - 抽题失败不能拖垮同步
         logger.exception("drawing daily problems failed")
+        with session_scope() as db:
+            notifications.report(db, "daily-draw", "每日一题抽取失败",
+                                 "自动抽题失败，请检查题库和同步服务日志。", "/editorials/admin")
+
+    # 公告到点撤销。和题解公布同一个小动作：过点把开关关掉，免得管理页
+    # 一直显示「取消公告」。
+    try:
+        with session_scope() as db:
+            cleared = posts_mod.sweep_expired_popups(db)
+        if cleared:
+            logger.info("swept %d expired popup(s)", cleared)
+    except Exception:  # noqa: BLE001 - 撤销失败不能拖垮同步
+        logger.exception("sweeping expired popups failed")
 
     # 题解到点就公布。搭在同步任务上而不是单独一个 timer：公布只是把
     # 两个时间戳填上，几毫秒的事，而同步每 5 分钟就跑一次，足够准。
@@ -511,8 +520,13 @@ def run_sync(*, platforms: list[str] | None = None, force: bool = False) -> dict
             changed = editorials.publish_due(db)
         if changed:
             logger.info("published %d editorial timestamp(s)", changed)
+        with session_scope() as db:
+            notifications.resolve(db, "editorial-publish")
     except Exception:  # noqa: BLE001 - 公布失败不能拖垮同步
         logger.exception("publishing due editorials failed")
+        with session_scope() as db:
+            notifications.report(db, "editorial-publish", "题解自动发布失败",
+                                 "题解发布任务失败，请检查服务日志。", "/editorials/admin")
 
     return {
         "account_count": fetched,

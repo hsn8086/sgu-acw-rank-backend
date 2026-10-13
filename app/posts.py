@@ -92,3 +92,26 @@ def touch(post: Post) -> None:
     新版本，就会再弹一次。
     """
     post.updated_at = utcnow()
+
+
+def sweep_expired_popups(session: Session, *, now: datetime | None = None) -> int:
+    """撤销到点的公告弹窗。返回清了几条。
+
+    ``is_popup`` 是开关，``popup_until`` 是自动下架时刻——过点了就该把开关
+    也关掉，不然管理页一直显示「取消公告」，看着像没有撤销。由定时任务
+    调，别放在读接口里偷偷写。
+    """
+    moment = now or datetime.now(UTC)
+    rows = session.exec(
+        select(Post).where(Post.is_popup.is_(True), Post.popup_until.is_not(None))  # type: ignore[union-attr]
+    ).all()
+    changed = 0
+    for post in rows:
+        if post.popup_until is not None and post.popup_until <= moment:
+            post.is_popup = False
+            post.popup_until = None
+            session.add(post)
+            changed += 1
+    if changed:
+        session.commit()
+    return changed

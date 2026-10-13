@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import io
 from datetime import timedelta
 
+import pyotp
+import qrcode
+import qrcode.image.svg
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy import update
 from sqlmodel import Session, select
 
@@ -22,7 +27,9 @@ from ..schemas import (
 from ..security import (
     hash_password,
     hash_session_token,
+    new_login_ticket,
     new_session_token,
+    verify_login_ticket,
     verify_password,
 )
 from ..student_id import StudentIdError, parse_student_id
@@ -159,13 +166,13 @@ def register(
     return user
 
 
-@router.post("/login", response_model=UserSelf)
+@router.post("/login")
 def login(
     payload: LoginRequest,
     request: Request,
     response: Response,
     db: Session = Depends(get_session),
-) -> User:
+) -> dict:
     student_id = payload.student_id.strip().upper()
     user = db.exec(select(User).where(User.student_id == student_id)).first()
 
@@ -180,6 +187,13 @@ def login(
     if user.status != UserStatus.ACTIVE:
         raise HTTPException(status_code=403, detail="账号已停用")
 
+    # 开了两步验证：先给一张签名的登录票据，等 TOTP 验完才发真 session。
+    if user.totp_secret:
+        return {
+            "totp_required": True,
+            "ticket": new_login_ticket(user.id or 0),
+        }
+
     user.last_login_at = utcnow()
     db.add(user)
     token = _issue_session(db, user, request)
@@ -187,7 +201,109 @@ def login(
     db.refresh(user)
 
     _set_session_cookie(response, token)
-    return user
+    return {"totp_required": False, "user": UserSelf.model_validate(user).model_dump()}
+
+
+class TotpLoginIn(BaseModel):
+    ticket: str
+    code: str = Field(min_length=6, max_length=8)
+
+
+@router.post("/login/totp")
+def login_totp(
+    payload: TotpLoginIn,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_session),
+) -> dict:
+    """第二步：票据 + TOTP 码 → 真 session。"""
+    uid = verify_login_ticket(payload.ticket)
+    if uid is None:
+        raise HTTPException(status_code=401, detail="票据过期或无效，请重新登录")
+    user = db.get(User, uid)
+    if user is None or not user.totp_secret:
+        raise HTTPException(status_code=401, detail="票据过期或无效，请重新登录")
+    if user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=403, detail="账号已停用")
+    if not pyotp.TOTP(user.totp_secret).verify(payload.code, valid_window=1):
+        raise HTTPException(status_code=401, detail="验证码不对")
+
+    user.last_login_at = utcnow()
+    db.add(user)
+    token = _issue_session(db, user, request)
+    db.commit()
+    db.refresh(user)
+    _set_session_cookie(response, token)
+    return {"totp_required": False, "user": UserSelf.model_validate(user).model_dump()}
+
+
+# --------------------------------------------------------------------------- #
+# TOTP 两步验证的开启 / 关闭（已登录成员自助）
+# --------------------------------------------------------------------------- #
+
+
+class TotpCodeIn(BaseModel):
+    code: str = Field(min_length=6, max_length=8)
+
+
+@router.post("/me/totp/begin")
+def totp_begin(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """生成待验证的 TOTP 密钥 + otpauth URI + QR（SVG 字符串）。
+
+    密钥落在 ``totp_pending_secret``，等 /me/totp/enable 验过码才转正——
+    直接转正的话，二维码没扫进去的人会被锁在自己账号外。
+    """
+    secret = pyotp.random_base32()
+    user.totp_pending_secret = secret
+    db.add(user)
+    db.commit()
+
+    uri = pyotp.TOTP(secret).provisioning_uri(
+        name=user.student_id, issuer_name=get_settings().rp_name
+    )
+    img = qrcode.make(uri, image_factory=qrcode.image.svg.SvgPathImage)
+    buf = io.BytesIO()
+    img.save(buf)
+    return {"secret": secret, "otpauth_uri": uri, "qr_svg": buf.getvalue().decode()}
+
+
+@router.post("/me/totp/enable")
+def totp_enable(
+    payload: TotpCodeIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """验证一个码，把 pending 密钥转正。"""
+    if not user.totp_pending_secret:
+        raise HTTPException(status_code=400, detail="没有待开启的两步验证，先调用 begin")
+    if not pyotp.TOTP(user.totp_pending_secret).verify(payload.code, valid_window=1):
+        raise HTTPException(status_code=422, detail="验证码不对")
+    user.totp_secret = user.totp_pending_secret
+    user.totp_pending_secret = None
+    db.add(user)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/me/totp/disable")
+def totp_disable(
+    payload: TotpCodeIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """关掉两步验证——要先验一次码，免得拿到会话的人随手关掉别人的。"""
+    if not user.totp_secret:
+        raise HTTPException(status_code=400, detail="没有开启两步验证")
+    if not pyotp.TOTP(user.totp_secret).verify(payload.code, valid_window=1):
+        raise HTTPException(status_code=422, detail="验证码不对")
+    user.totp_secret = None
+    user.totp_pending_secret = None
+    db.add(user)
+    db.commit()
+    return {"ok": True}
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)

@@ -88,7 +88,7 @@ def member_client(env, root_client):
         json={
             "student_id": MEMBER_STUDENT_ID,
             "password": MEMBER_PASSWORD,
-            "display_name": "谢泽栩",
+            "display_name": "队员甲",
         },
     )
     assert response.status_code in (200, 201), response.text
@@ -108,7 +108,7 @@ def member2_client(env, root_client):
         json={
             "student_id": MEMBER2_STUDENT_ID,
             "password": MEMBER2_PASSWORD,
-            "display_name": "卢成洋",
+            "display_name": "队员乙",
         },
     )
     assert response.status_code in (200, 201), response.text
@@ -429,7 +429,7 @@ def test_leaderboard_only_counts_camp_problems(member_client, member2_client, db
 
     board = camps.leaderboard(db, camp)
     assert len(board) == 2
-    assert board[0][0].display_name == "卢成洋"
+    assert board[0][0].display_name == "队员乙"
     assert board[0][1] == 2
     assert board[1][1] == 1
     assert board[1][2] == {"codeforces:1A": True, "codeforces:1B": False}
@@ -494,7 +494,7 @@ def test_export_json(root_client, member_client, db):
     assert "codeforces:1A" in data["headers"]
     row = data["rows"][0]
     # 学院 专业 班级 姓名 学号 洛谷号 过题数 每题
-    assert row[3] == "谢泽栩"
+    assert row[3] == "队员甲"
     assert row[5] == "1489036"
     assert row[6] == "1"
     assert row[7] == "是"
@@ -510,7 +510,7 @@ def test_export_csv_has_bom(root_client, member_client, db):
     response = root_client.get(f"/api/admin/camps/{camp.id}/export?format=csv")
     assert response.status_code == 200
     assert response.content.startswith(b"\xef\xbb\xbf")
-    assert "谢泽栩" in response.text
+    assert "队员甲" in response.text
 
 
 def test_export_xlsx(root_client, member_client, db):

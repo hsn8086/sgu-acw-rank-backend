@@ -14,11 +14,13 @@ from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlmodel import Session, select
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import models
+from . import migrate, models
+from . import notifications as notices
 from .config import get_settings
-from .db import get_engine, init_db
+from .db import get_engine, init_db, session_scope
 from .deps import require_origin_secret
 from .models import Role, User, utcnow
 from .routers import (
@@ -29,10 +31,15 @@ from .routers import (
     daily,
     editorials,
     meta,
+    notifications,
     posts,
     practice,
     problemlists,
+    push,
+    signups,
     users,
+    webauthn,
+    workshop,
 )
 from .security import hash_password
 from .student_id import ROOT_STUDENT_ID, StudentIdError, is_root_student_id, parse_student_id
@@ -117,6 +124,9 @@ def bootstrap_root() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # 列级迁移跟启动绑死：部署忘了跑 python -m app.migrate 也不能让
+    # 「no such column」炸到线上。
+    migrate.run_migration()
     bootstrap_root()
     yield
 
@@ -145,6 +155,38 @@ def create_app() -> FastAPI:
     app.include_router(editorials.router, prefix=API_PREFIX)
     app.include_router(editorials.internal_router, prefix=API_PREFIX)
     app.include_router(admin.router, prefix=API_PREFIX)
+    app.include_router(notifications.router, prefix=API_PREFIX)
+    app.include_router(workshop.router, prefix=API_PREFIX)
+    app.include_router(push.router, prefix=API_PREFIX)
+    app.include_router(signups.router, prefix=API_PREFIX)
+    app.include_router(webauthn.router, prefix=API_PREFIX)
+
+    def record_request_health(method: str, path: str, failed: bool) -> None:
+        try:
+            with session_scope() as db:
+                key = f"api:{method}:{path}"
+                if failed:
+                    notices.report(db, key, "服务接口异常",
+                                   f"{method} {path} 返回服务器错误，请查看服务日志。")
+                else:
+                    notices.resolve(db, key)
+        except Exception:
+            logger.exception("could not persist API health notification")
+
+    @app.middleware("http")
+    async def notify_server_errors(request, call_next):
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("unhandled API request error")
+            response = JSONResponse(status_code=500, content={"detail": "服务暂时异常，请稍后重试"})
+        route = request.scope.get("route")
+        # 使用路由模板，不记录查询参数、正文、密码或令牌。
+        if route and (response.status_code >= 500 or response.status_code < 400):
+            await run_in_threadpool(record_request_health, request.method, route.path,
+                                    response.status_code >= 500)
+        return response
+
 
     @app.exception_handler(StarletteHTTPException)
     async def http_exception_handler(_request, exc: StarletteHTTPException) -> JSONResponse:

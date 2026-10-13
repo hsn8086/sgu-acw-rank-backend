@@ -27,6 +27,7 @@ from ..models import (
     EditorialStatus,
     Invite,
     ProblemCache,
+    PushSubscription,
     Role,
     SolvedSnapshot,
     User,
@@ -205,8 +206,8 @@ def list_users(
         else:
             statement = statement.where(User.id.not_in(bound))  # type: ignore[attr-defined]
 
-    # 总数要在分页之前算。
-    total = len(db.exec(statement).all())
+    # 总数要在分页之前算，但只取 COUNT，不能把所有匹配成员加载到内存。
+    total = db.exec(select(func.count()).select_from(statement.subquery())).one()
 
     sort_columns = {
         "enroll_year": (User.enroll_year.desc(), User.student_id),  # type: ignore[union-attr]
@@ -368,6 +369,9 @@ def update_user(
     if payload.major_override is not None:
         user.major_override = payload.major_override.strip() or None
 
+    if payload.class_no is not None:
+        user.class_no = payload.class_no
+
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -466,11 +470,20 @@ def stats(db: Session = Depends(get_session)) -> dict:
         select(func.count()).select_from(User).where(User.role.in_(Role.ADMINISTRATIVE))  # type: ignore[attr-defined]
     ).one()
     live_invites = [row for row in db.exec(select(Invite)).all() if row.is_usable]
+    # 开了推送的成员数：按 user_id 去重（一人多设备只算一次）。
+    push_users = len(
+        set(
+            db.exec(select(PushSubscription.user_id)).all()
+        )
+    )
+    push_devices = len(db.exec(select(PushSubscription)).all())
     return {
         "user_count": int(total),
         "active_count": int(active),
         "admin_count": int(admins),
         "usable_invite_count": len(live_invites),
+        "push_subscriber_count": push_users,
+        "push_device_count": push_devices,
     }
 
 
@@ -545,6 +558,7 @@ def get_member_detail(
             last_error=a.last_error,
             consecutive_failures=a.consecutive_failures,
             rating_failures=a.rating_failures,
+            sync_flag=a.sync_flag,
             created_at=a.created_at,
             solved_count=solved_by_account.get(a.id or 0, 0),
             active_days=active_days_by_account.get(a.id or 0, 0),

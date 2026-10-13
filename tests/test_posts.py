@@ -74,7 +74,7 @@ def member_client(env, root_client):
         json={
             "student_id": MEMBER_STUDENT_ID,
             "password": MEMBER_PASSWORD,
-            "display_name": "谢泽栩",
+            "display_name": "队员甲",
         },
     )
     assert r.status_code in (200, 201), r.text
@@ -231,12 +231,25 @@ def test_list_only_published(client, db):
     assert [r["title"] for r in rows] == ["看得见"]
 
 
-def test_list_sorted_by_sort_order(client, db):
-    make_post(db, title="低", sort_order=1)
-    make_post(db, title="高", sort_order=100)
+def test_list_sorted_by_created_at_then_sort_order(client, db):
+    """先按 sort_order（置顶），同值再按发布时间倒序。"""
+    from datetime import UTC, datetime, timedelta
+    base = datetime(2026, 10, 1, 12, 0, 0, tzinfo=UTC)
+    # 三篇同 sort_order，created_at 递增：后发的排前面
+    for i, title in enumerate(["a", "b", "c"]):
+        p = make_post(db, title=title, sort_order=0)
+        # 手动改 created_at 保证顺序
+        p.created_at = base + timedelta(hours=i)
+        db.add(p)
+    db.commit()
+    # 一篇 sort_order=1，不管时间多旧都排最前
+    pinned = make_post(db, title="置顶", sort_order=1)
+    pinned.created_at = base - timedelta(days=1)
+    db.add(pinned)
+    db.commit()
 
     rows = client.get("/api/posts").json()
-    assert [r["title"] for r in rows] == ["高", "低"]
+    assert [r["title"] for r in rows] == ["置顶", "c", "b", "a"]
 
 
 def test_detail_unpublished_is_404(client, db):

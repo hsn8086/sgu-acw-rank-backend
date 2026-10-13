@@ -143,10 +143,11 @@ def test_bootstrap_root_uses_placeholder_student_id(tmp_path, monkeypatch):
             json={"student_id": "00000000000", "password": "rootpass123"},
         )
         assert login.status_code == 200, login.text
-        assert login.json()["role"] == "root"
-        assert login.json()["student_id"] == "00000000000"
+        assert login.json()["totp_required"] is False
+        assert login.json()["user"]["role"] == "root"
+        assert login.json()["user"]["student_id"] == "00000000000"
         # 年级是占位的 0，前端会显示成空白而不是「0 级」。
-        assert login.json()["enroll_year"] == 0
+        assert login.json()["user"]["enroll_year"] == 0
 
     db_module.reset_engine()
     get_settings.cache_clear()

@@ -41,6 +41,9 @@ class UserSelf(UserPublic):
     """What a member sees about themselves. Adds nothing private for now, but
     keeps a distinct type so fields can diverge without touching callers."""
 
+    #: 两步验证是否已开——/me 页设置项的显示状态，登录流程判断是否弹码。
+    totp_enabled: bool = False
+
 
 class AdminAccountBrief(BaseModel):
     """成员列表里显示的平台账号摘要。
@@ -178,6 +181,8 @@ class UpdateUserAdminRequest(BaseModel):
     #: 「可发文章」开关。给成员开后他能写文章（弹窗和上下架还是管理员管）。
     can_post: bool | None = None
     major_override: str | None = Field(default=None, max_length=64)
+    #: 班级序号，学号第 8 位。0 表示未分班（不显示班级）。
+    class_no: int | None = Field(default=None, ge=0, le=99)
 
     @field_validator("role")
     @classmethod
@@ -256,6 +261,9 @@ class AccountPublic(BaseModel):
     #: 仅在未验证时出现，用于告诉成员该把什么填进签名。
     verify_token: str | None = None
     verify_expires_at: datetime | None = None
+    #: 账号状态标记：privacy = 开了平台隐私保护，unverified = 未实名。
+    #: ``None`` 表示正常。成员自己也要看到这个状态，才知道该去关隐私设置。
+    sync_flag: str | None = None
     created_at: datetime
 
 
@@ -603,6 +611,8 @@ class AdminAccountDetail(BaseModel):
     last_error: str | None = None
     consecutive_failures: int = 0
     rating_failures: int = 0
+    #: 账号状态标记（privacy / unverified）。
+    sync_flag: str | None = None
 
     created_at: datetime
     #: 已过题目数。来自最近一次快照。

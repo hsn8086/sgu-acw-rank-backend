@@ -126,9 +126,11 @@ def _author_map(session: Session, posts: list[Post]) -> dict[int, User]:
 
 @router.get("/posts", response_model=list[PostSummary])
 def list_posts(session: Session = Depends(get_session)) -> list[PostSummary]:
-    """已发布的文章，sort_order 大的在前。"""
+    """已发布的文章，按发布时间倒序；sort_order 只用来手动置顶。"""
     rows = session.exec(
-        select(Post).where(Post.published.is_(True)).order_by(Post.sort_order.desc())  # type: ignore[union-attr]
+        select(Post)
+        .where(Post.published.is_(True))
+        .order_by(Post.sort_order.desc(), Post.created_at.desc())  # type: ignore[union-attr]
     ).all()
     authors = _author_map(session, rows)
     return [_to_summary(p, authors.get(p.author_id)) for p in rows]
