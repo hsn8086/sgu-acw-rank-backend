@@ -1,0 +1,73 @@
+name: Deploy backend
+
+# 推 main → 测试全绿 → rsync 上服务器 → uv sync → 重启 → 健康检查。
+# 部署不取消排队（cancel-in-progress: false）——半截部署比慢部署可怕。
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: backend-deploy
+  cancel-in-progress: false
+
+env:
+  REMOTE_DIR: /opt/sgu-acw-api
+  UV_BIN: /root/.local/bin/uv
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check app tests
+
+      - name: Tests
+        run: uv run pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: SSH setup
+        env:
+          SSH_KEY: ${{ secrets.SGU_ACW_SSH_KEY }}
+          SSH_HOST: ${{ secrets.SGU_ACW_SSH_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Rsync and restart
+        env:
+          SSH_USER: ${{ secrets.SGU_ACW_SSH_USER }}
+          SSH_HOST: ${{ secrets.SGU_ACW_SSH_HOST }}
+        run: |
+          rsync -az --delete-delay \
+            -e "ssh -i ~/.ssh/id_ed25519" \
+            app/ "$SSH_USER@$SSH_HOST:$REMOTE_DIR/app/"
+          rsync -az \
+            -e "ssh -i ~/.ssh/id_ed25519" \
+            pyproject.toml uv.lock "$SSH_USER@$SSH_HOST:$REMOTE_DIR/"
+          ssh -i ~/.ssh/id_ed25519 "$SSH_USER@$SSH_HOST" \
+            "cd $REMOTE_DIR \
+              && $UV_BIN sync --frozen \
+              && .venv/bin/python -m compileall -q app \
+              && systemctl restart sgu-acw-api.service \
+              && sleep 3 \
+              && curl -fsS http://127.0.0.1:8091/api/healthz"
